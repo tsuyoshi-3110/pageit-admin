@@ -28,6 +28,11 @@ export default function Home() {
     localStorage.setItem("pageit_password", password);
   }, [password, setOpenFlag]);
 
+  // openFlag の変更を localStorage に保存（状態復元用）
+  useEffect(() => {
+    localStorage.setItem("pageit_open_flag", JSON.stringify(openFlag));
+  }, [openFlag]);
+
   return (
     <div className="flex flex-col items-center justify-center min-h-[calc(100vh-120px)] gap-6 p-8">
       <Image

@@ -58,6 +58,7 @@ export default function SiteListPage() {
   const [editOwnerName, setEditOwnerName] = useState("");
   const [editOwnerPhone, setEditOwnerPhone] = useState("");
   const [editOwnerAddress, setEditOwnerAddress] = useState("");
+  const [searchKeyword, setSearchKeyword] = useState("");
 
   const [transferLogMap, setTransferLogMap] = useState<
     Map<string, { collected: boolean }>
@@ -119,33 +120,45 @@ export default function SiteListPage() {
     return () => unsub();
   }, [router]);
 
-  const renderSetupModeToggle = (siteId: string, current: boolean | undefined) => {
-  const toggleSetup = async () => {
-    const newVal = !current;
-    await updateDoc(doc(db, "siteSettings", siteId), {
-      setupMode: newVal,
-      updatedAt: Timestamp.now(),
-    });
+  const filteredSites = sites
+    .filter((site) => {
+      const keyword = searchKeyword.toLowerCase();
+      return (
+        site.siteName?.toLowerCase().includes(keyword) ||
+        site.ownerName?.toLowerCase().includes(keyword) ||
+        site.ownerPhone?.toLowerCase().includes(keyword) ||
+        site.ownerEmail?.toLowerCase().includes(keyword)
+      );
+    })
+    .sort((a, b) => (a.ownerName ?? "").localeCompare(b.ownerName ?? "", "ja"));
+  const renderSetupModeToggle = (
+    siteId: string,
+    current: boolean | undefined
+  ) => {
+    const toggleSetup = async () => {
+      const newVal = !current;
+      await updateDoc(doc(db, "siteSettings", siteId), {
+        setupMode: newVal,
+        updatedAt: Timestamp.now(),
+      });
 
-    // 再取得またはstate更新
-    setSites((prev) =>
-      prev.map((s) =>
-        s.id === siteId ? { ...s, setupMode: newVal } : s
-      )
+      // 再取得またはstate更新
+      setSites((prev) =>
+        prev.map((s) => (s.id === siteId ? { ...s, setupMode: newVal } : s))
+      );
+    };
+
+    return (
+      <Button
+        className="cursor-pointer"
+        variant={current ? "default" : "outline"}
+        size="sm"
+        onClick={toggleSetup}
+      >
+        {current ? "✅ セットアップ中" : "セットアップモードにする"}
+      </Button>
     );
   };
-
-  return (
-    <Button
-      variant={current ? "default" : "outline"}
-      size="sm"
-      onClick={toggleSetup}
-    >
-      {current ? "✅ セットアップ中" : "セットアップモードにする"}
-    </Button>
-  );
-};
-
 
   const fetchCredentialsSentLogs = async () => {
     const snap = await getDocs(collection(db, "credentialsSentLogs"));
@@ -333,13 +346,21 @@ export default function SiteListPage() {
     <div className="max-w-3xl mx-auto px-4 py-8 space-y-4">
       <h1 className="text-2xl font-bold mb-4">サイト一覧</h1>
 
+      <Input
+        type="text"
+        placeholder="名前・電話・メールで検索"
+        className="mb-4"
+        value={searchKeyword}
+        onChange={(e) => setSearchKeyword(e.target.value)}
+      />
+
       {loading && (
         <div className="flex justify-center items-start min-h-screen pt-32">
           <Loader2 className="h-12 w-12 animate-spin text-muted-foreground" />
         </div>
       )}
 
-      {sites.map((site) => {
+      {filteredSites.map((site) => {
         const isPending =
           site.cancelPending === true ||
           site.paymentStatus === "pending_cancel";
@@ -386,18 +407,22 @@ export default function SiteListPage() {
             ) : (
               <>
                 <div className="flex items-center gap-2">
-                  <span className="font-bold text-lg">{site.siteName}</span>
+                  <div className="flex justify-center w-full bg-gray-500">
+                    <span className="font-bold text-lg">{site.siteName}</span>
+                  </div>
+
                   {isPending && (
-                    <span className="px-2 py-0.5 text-xs rounded bg-yellow-500 text-white">
-                      解約予定
+                    <span className="flex justify-center items-center px-2 py-0.5 text-xs rounded w-20 h-8 bg-yellow-500 text-white">
+                      解約予約
                     </span>
                   )}
                   {isCanceled && (
-                    <span className="px-2 py-0.5 text-xs rounded bg-gray-500 text-white">
+                    <span className="flex justify-center items-center px-2 py-0.5 text-xs rounded w-20 h-8 bg-gray-500 text-white">
                       解約済み
                     </span>
                   )}
                 </div>
+
                 <div>オーナー: {site.ownerName}</div>
                 <div>電話番号: {site.ownerPhone}</div>
                 <div>住所: {site.ownerAddress}</div>
@@ -471,7 +496,6 @@ export default function SiteListPage() {
                 </Button>
 
                 {renderSetupModeToggle(site.id, site.setupMode)}
-
 
                 <Button
                   className="cursor-pointer"

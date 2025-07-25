@@ -5,19 +5,26 @@ import { useEffect, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { User } from "firebase/auth";
-import { useAtomValue } from "jotai";
+import { useAtom } from "jotai";
 import { openFlagAtom } from "@/lib/atoms/openFlagAtom";
 import { Menu, X } from "lucide-react";
 
 export default function NavBar() {
   const [user, setUser] = useState<User | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  const openFlag = useAtomValue(openFlagAtom);
+  const [openFlag, setOpenFlag] = useAtom(openFlagAtom);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, setUser);
     return () => unsub();
   }, []);
+
+  useEffect(() => {
+    const savedFlag = localStorage.getItem("pageit_open_flag");
+    if (savedFlag !== null) {
+      setOpenFlag(JSON.parse(savedFlag));
+    }
+  }, [setOpenFlag]);
 
   const toggleMenu = () => setMenuOpen((prev) => !prev);
 
@@ -34,39 +41,12 @@ export default function NavBar() {
 
         {/* ハンバーガーアイコン（モバイル） */}
         <button
-          className="md:hidden text-gray-700"
+          className=" text-gray-700"
           onClick={toggleMenu}
           aria-label="メニューを開く"
         >
           <Menu className="w-6 h-6" />
         </button>
-
-        {/* PCメニュー */}
-        <div className="hidden md:flex gap-4 items-center">
-          {openFlag && (
-            <>
-              <Link href="/login" className="text-sm text-gray-700 hover:text-blue-500">
-                ログイン
-              </Link>
-              {user && (
-                <>
-                  <Link href="/register" className="text-sm text-gray-700 hover:text-blue-500">
-                    アカウント作成
-                  </Link>
-                  <Link href="/sites" className="text-sm text-gray-700 hover:text-blue-500">
-                    サイト一覧
-                  </Link>
-                  <Link href="/send-transfer" className="text-sm text-gray-700 hover:text-blue-500">
-                    請求メール
-                  </Link>
-                  <Link href="/send-credentials" className="text-sm text-gray-700 hover:text-blue-500">
-                    アカウントメール
-                  </Link>
-                </>
-              )}
-            </>
-          )}
-        </div>
       </nav>
 
       {/* オーバーレイ */}
@@ -93,21 +73,41 @@ export default function NavBar() {
         <div className="flex flex-col px-4 py-2 space-y-3">
           {openFlag && (
             <>
-              <Link href="/login" onClick={toggleMenu} className="text-gray-700 hover:text-blue-500">
+              <Link
+                href="/login"
+                onClick={toggleMenu}
+                className="text-gray-700 hover:text-blue-500"
+              >
                 ログイン
               </Link>
               {user && (
                 <>
-                  <Link href="/register" onClick={toggleMenu} className="text-gray-700 hover:text-blue-500">
+                  <Link
+                    href="/register"
+                    onClick={toggleMenu}
+                    className="text-gray-700 hover:text-blue-500"
+                  >
                     アカウント作成
                   </Link>
-                  <Link href="/sites" onClick={toggleMenu} className="text-gray-700 hover:text-blue-500">
+                  <Link
+                    href="/sites"
+                    onClick={toggleMenu}
+                    className="text-gray-700 hover:text-blue-500"
+                  >
                     サイト一覧
                   </Link>
-                  <Link href="/send-transfer" onClick={toggleMenu} className="text-gray-700 hover:text-blue-500">
+                  <Link
+                    href="/send-transfer"
+                    onClick={toggleMenu}
+                    className="text-gray-700 hover:text-blue-500"
+                  >
                     請求メール
                   </Link>
-                  <Link href="/send-credentials" onClick={toggleMenu} className="text-gray-700 hover:text-blue-500">
+                  <Link
+                    href="/send-credentials"
+                    onClick={toggleMenu}
+                    className="text-gray-700 hover:text-blue-500"
+                  >
                     アカウントメール
                   </Link>
                 </>
@@ -119,4 +119,3 @@ export default function NavBar() {
     </>
   );
 }
-

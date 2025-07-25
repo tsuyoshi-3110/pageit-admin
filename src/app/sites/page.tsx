@@ -38,6 +38,7 @@ type Site = {
   homepageUrl?: string;
   cancelPending?: boolean;
   paymentStatus?: "active" | "pending_cancel" | "canceled" | "none";
+  setupMode?: boolean;
 };
 
 type TransferLog = {
@@ -117,6 +118,34 @@ export default function SiteListPage() {
 
     return () => unsub();
   }, [router]);
+
+  const renderSetupModeToggle = (siteId: string, current: boolean | undefined) => {
+  const toggleSetup = async () => {
+    const newVal = !current;
+    await updateDoc(doc(db, "siteSettings", siteId), {
+      setupMode: newVal,
+      updatedAt: Timestamp.now(),
+    });
+
+    // 再取得またはstate更新
+    setSites((prev) =>
+      prev.map((s) =>
+        s.id === siteId ? { ...s, setupMode: newVal } : s
+      )
+    );
+  };
+
+  return (
+    <Button
+      variant={current ? "default" : "outline"}
+      size="sm"
+      onClick={toggleSetup}
+    >
+      {current ? "✅ セットアップ中" : "セットアップモードにする"}
+    </Button>
+  );
+};
+
 
   const fetchCredentialsSentLogs = async () => {
     const snap = await getDocs(collection(db, "credentialsSentLogs"));
@@ -440,6 +469,9 @@ export default function SiteListPage() {
                 >
                   {site.homepageUrl ? "✏️ URLを編集" : "＋ URLを追加"}
                 </Button>
+
+                {renderSetupModeToggle(site.id, site.setupMode)}
+
 
                 <Button
                   className="cursor-pointer"

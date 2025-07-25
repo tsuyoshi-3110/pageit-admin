@@ -15,6 +15,7 @@ export async function createSiteSettings(
     stripeCustomerId?: string;
     stripeSubscriptionId?: string;
     isFreePlan: boolean;
+    setupMode?: boolean;
   }
 ) {
   const ref = doc(db, "siteSettings", siteId);

@@ -117,6 +117,7 @@ export default function RegisterPage() {
         isFreePlan,
         ...(customerId && { stripeCustomerId: customerId }),
         ...(subscriptionId && { stripeSubscriptionId: subscriptionId }),
+        setupMode: false
       });
 
       // メール通知（パスワード付き）

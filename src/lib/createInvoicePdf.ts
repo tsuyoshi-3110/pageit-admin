@@ -1,10 +1,7 @@
 // lib/createInvoicePdf.ts
 import { PDFDocument, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
-import { promises as fs } from "fs";
-import path from "path";
 
-/* ───────── 型 ───────── */
 export type InvoiceParams = {
   customerName: string;
   setupSelected: boolean;
@@ -14,39 +11,32 @@ export type InvoiceParams = {
   invoiceNumber: string;
   invoiceDate: string;
   dueDate: string;
-  logoPath: string;
-  itemIconPath?: string;
+  logoPath: string; // ← URL形式で渡す
+  itemIconPath?: string; // ← URL形式で渡す
 };
 
 export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.create();
   pdfDoc.registerFontkit(fontkit);
 
-  const jpFont = await pdfDoc.embedFont(
-    await fs.readFile(
-      path.resolve(process.cwd(), "public/fonts/NotoSansJP-Regular.ttf")
-    )
-  );
-  // const asciiFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  // ✅ フォントをURL経由で取得（Noto Sans JP）
+  const fontRes = await fetch("https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf");
+  const fontBuffer = await fontRes.arrayBuffer();
+  const jpFont = await pdfDoc.embedFont(fontBuffer);
 
   const page = pdfDoc.addPage([595, 842]);
   const { width, height } = page.getSize();
   const LEFT = 55;
   const GAP = 20;
-
   const HEADER_H = 90;
-  // page.drawRectangle({
-  //   x: 0,
-  //   y: height - HEADER_H,
-  //   width,
-  //   height: HEADER_H,
-  //   color: rgb(40 / 255, 48 / 255, 72 / 255),
-  // });
 
-  const logoBytes = await fs.readFile(path.resolve(process.cwd(), p.logoPath));
+  // ✅ ロゴ画像の読み込み（fetch → ArrayBuffer → embed）
+  const logoRes = await fetch(p.logoPath);
+  const logoBuffer = await logoRes.arrayBuffer();
   const logoImg = p.logoPath.toLowerCase().endsWith(".png")
-    ? await pdfDoc.embedPng(logoBytes)
-    : await pdfDoc.embedJpg(logoBytes);
+    ? await pdfDoc.embedPng(logoBuffer)
+    : await pdfDoc.embedJpg(logoBuffer);
+
   const logoDim = logoImg.scale(60 / logoImg.height);
   page.drawImage(logoImg, {
     x: width - logoDim.width - 40,
@@ -71,15 +61,15 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
   });
 
   let yPos = height - HEADER_H - 45;
-  const drawRow = (label: string, val: string, vFont = jpFont) => {
+  const drawRow = (label: string, val: string) => {
     page.drawText(label, { x: LEFT, y: yPos, size: 12, font: jpFont });
-    page.drawText(val, { x: LEFT + 110, y: yPos, size: 12, font: vFont });
+    page.drawText(val, { x: LEFT + 110, y: yPos, size: 12, font: jpFont });
     yPos -= GAP;
   };
+
   drawRow("請求日", p.invoiceDate);
   drawRow("支払期限", p.dueDate);
   drawRow("宛　先", `${p.customerName} 様`);
-  // drawRow("登録番号", QUALIFIED_ID, asciiFont);
 
   yPos -= 12;
   const TABLE_W = 480;
@@ -95,21 +85,19 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
     color: rgb(0.85, 0.85, 0.85),
   });
 
-  // アイコンを1回だけ描画（項目表の左上に）
+  // ✅ アイコンを読み込み（任意）
   if (p.itemIconPath) {
-    const iconBytes = await fs.readFile(
-      path.resolve(process.cwd(), p.itemIconPath)
-    );
+    const iconRes = await fetch(p.itemIconPath);
+    const iconBuffer = await iconRes.arrayBuffer();
     const iconImg = p.itemIconPath.toLowerCase().endsWith(".png")
-      ? await pdfDoc.embedPng(iconBytes)
-      : await pdfDoc.embedJpg(iconBytes);
+      ? await pdfDoc.embedPng(iconBuffer)
+      : await pdfDoc.embedJpg(iconBuffer);
 
     const iconHeight = 60;
     const iconYOffset = -50;
     const iconDim = iconImg.scale(iconHeight / iconImg.height);
 
-    // 表の開始Y座標のちょっと下にアイコンを1つだけ描画
-    const iconX = LEFT + 8; // 左から少し右
+    const iconX = LEFT + 8;
     const iconY = yPos - 40 + iconYOffset;
 
     page.drawImage(iconImg, {
@@ -138,8 +126,7 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
 
   const items: [string, number][] = [];
   if (p.setupSelected) items.push(["初期セットアップ", p.setupPrice ?? 30000]);
-  if (p.shootingSelected)
-    items.push(["撮影編集代行", p.shootingPrice ?? 50000]);
+  if (p.shootingSelected) items.push(["撮影編集代行", p.shootingPrice ?? 50000]);
 
   const amount = items.reduce((sum, [, price]) => sum + price, 0);
   const tax = Math.round(amount * 0.1);
@@ -168,7 +155,6 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
     });
   });
 
-  // 下から60pxあたりに表示（必要なら微調整可）
   const BANK_INFO_Y_START = 200;
   const BANK_INFO_LINES = [
     "三菱ＵＦＪ銀行　新大阪支店",

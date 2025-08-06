@@ -17,8 +17,11 @@ const {
 } = process.env;
 
 const INVOICE_ID = "T4120001209252";
+const baseUrl =
+  process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
 
 export async function POST(req: NextRequest) {
+  console.log("CLIENT_ID:", process.env.GOOGLE_CLIENT_ID);
   try {
     const {
       to,
@@ -55,8 +58,8 @@ export async function POST(req: NextRequest) {
       invoiceNumber: INVOICE_ID,
       invoiceDate: invDate,
       dueDate: dueDateJP,
-      logoPath: "public/images/xenoLogo.png",
-      itemIconPath: "public/images/logo.png",
+      logoPath: `${baseUrl}/images/xenoLogo.png`,
+      itemIconPath: `${baseUrl}/images/logo.png`,
     });
 
     const oAuth2 = new google.auth.OAuth2(

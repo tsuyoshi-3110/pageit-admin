@@ -39,6 +39,7 @@ type Site = {
   cancelPending?: boolean;
   paymentStatus?: "active" | "pending_cancel" | "canceled" | "none";
   setupMode?: boolean;
+  isFreePlan?: boolean;
 };
 
 type TransferLog = {
@@ -407,9 +408,17 @@ export default function SiteListPage() {
             ) : (
               <>
                 <div className="flex items-center gap-2">
+
+                  {site.isFreePlan && (
+                    <span className="flex justify-center items-center px-2 py-0.5 text-xs rounded w-20 h-8 bg-blue-500 text-white ml-2">
+                      無料
+                    </span>
+                  )}
                   <div className="flex justify-center w-full bg-gray-500">
                     <span className="font-bold text-lg">{site.siteName}</span>
                   </div>
+
+
 
                   {isPending && (
                     <span className="flex justify-center items-center px-2 py-0.5 text-xs rounded w-20 h-8 bg-yellow-500 text-white">

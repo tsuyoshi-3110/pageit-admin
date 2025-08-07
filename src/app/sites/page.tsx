@@ -408,7 +408,6 @@ export default function SiteListPage() {
             ) : (
               <>
                 <div className="flex items-center gap-2">
-
                   {site.isFreePlan && (
                     <span className="flex justify-center items-center px-2 py-0.5 text-xs rounded w-20 h-8 bg-blue-500 text-white ml-2">
                       無料
@@ -417,8 +416,6 @@ export default function SiteListPage() {
                   <div className="flex justify-center w-full bg-gray-500">
                     <span className="font-bold text-lg">{site.siteName}</span>
                   </div>
-
-
 
                   {isPending && (
                     <span className="flex justify-center items-center px-2 py-0.5 text-xs rounded w-20 h-8 bg-yellow-500 text-white">
@@ -541,21 +538,23 @@ export default function SiteListPage() {
                   firebaseアカウント削除
                 </Button>
 
-                {site.paymentStatus !== "none" && (
-                  <Button
-                    className="cursor-pointer"
-                    size="sm"
-                    variant="default"
-                    onClick={() =>
-                      handleSendInv(
-                        site.ownerEmail ?? "noEmail",
-                        site.ownerName ?? "noName"
-                      )
-                    }
-                  >
-                    📩 請求書送信
-                  </Button>
-                )}
+                {site.paymentStatus === "none" &&
+                  !site.isFreePlan &&
+                  site.ownerEmail && (
+                    <Button
+                      className="cursor-pointer"
+                      size="sm"
+                      variant="default"
+                      onClick={() =>
+                        handleSendInv(
+                          site.ownerEmail ?? "noName",
+                          site.ownerName ?? "noName"
+                        )
+                      }
+                    >
+                      📩 請求書送信
+                    </Button>
+                  )}
               </div>
             )}
           </Card>

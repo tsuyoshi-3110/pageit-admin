@@ -8,6 +8,10 @@ export type InvoiceParams = {
   shootingSelected: boolean;
   setupPrice?: number;
   shootingPrice?: number;
+  satueiSelected: boolean;
+  henshuSelected: boolean;
+  satueiPrice?: number;
+  henshuPrice?: number;
   invoiceNumber: string;
   invoiceDate: string;
   dueDate: string;
@@ -20,7 +24,9 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
   pdfDoc.registerFontkit(fontkit);
 
   // ✅ フォントをURL経由で取得（Noto Sans JP）
-  const fontRes = await fetch("https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf");
+  const fontRes = await fetch(
+    "https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf"
+  );
   const fontBuffer = await fontRes.arrayBuffer();
   const jpFont = await pdfDoc.embedFont(fontBuffer);
 
@@ -38,10 +44,28 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
     : await pdfDoc.embedJpg(logoBuffer);
 
   const logoDim = logoImg.scale(60 / logoImg.height);
+  // ロゴの描画位置を変数にして再利用
+  const logoX = width - logoDim.width - 40;
+  const logoY = height - HEADER_H + (HEADER_H - logoDim.height) / 2;
+
   page.drawImage(logoImg, {
     x: width - logoDim.width - 40,
     y: height - HEADER_H + (HEADER_H - logoDim.height) / 2,
     ...logoDim,
+  });
+
+  // ★ 追加：ロゴの真下にブランド名をセンタリングして描画
+  const BRAND_LABEL = "Xenovant";
+  const brandSize = 14; // お好みで
+  const brandGap = 6;
+  const brandWidth = jpFont.widthOfTextAtSize(BRAND_LABEL, brandSize);
+
+  page.drawText(BRAND_LABEL, {
+    x: logoX + (logoDim.width - brandWidth) / 2, // ロゴの中央に合わせる
+    y: logoY - brandGap, // ロゴの少し下に配置（行間はお好みで）
+    size: brandSize,
+    font: jpFont,
+    color: rgb(0.15, 0.15, 0.15),
   });
 
   page.drawText("請  求  書", {
@@ -126,7 +150,10 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
 
   const items: [string, number][] = [];
   if (p.setupSelected) items.push(["初期セットアップ", p.setupPrice ?? 30000]);
-  if (p.shootingSelected) items.push(["撮影編集代行", p.shootingPrice ?? 50000]);
+  if (p.shootingSelected)
+    items.push(["撮影編集代行", p.shootingPrice ?? 50000]);
+  if (p.satueiSelected) items.push(["撮影代行", p.satueiPrice ?? 35000]);
+  if (p.henshuSelected) items.push(["編集代行", p.henshuPrice ?? 15000]);
 
   const amount = items.reduce((sum, [, price]) => sum + price, 0);
   const tax = Math.round(amount * 0.1);
@@ -155,7 +182,10 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
     });
   });
 
-  const BANK_INFO_Y_START = 200;
+  const BANK_INFO_Y_START = 100; // 以前: 200（小さくすると下に移動）
+  const BANK_INFO_LABEL_X = LEFT + 300; // 以前: LEFT + 300（増やすと右へ）
+  const BANK_INFO_TEXT_X = LEFT + 325; // 以前: LEFT + 325（増やすと右へ）
+
   const BANK_INFO_LINES = [
     "三菱ＵＦＪ銀行　新大阪支店",
     "普通　5002177",
@@ -163,7 +193,7 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
   ];
 
   page.drawText("【振込先】", {
-    x: LEFT + 300,
+    x: BANK_INFO_LABEL_X,
     y: BANK_INFO_Y_START,
     size: 12,
     font: jpFont,
@@ -171,19 +201,11 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
 
   BANK_INFO_LINES.forEach((txt, i) => {
     page.drawText(txt, {
-      x: LEFT + 325,
+      x: BANK_INFO_TEXT_X,
       y: BANK_INFO_Y_START - GAP * (i + 1),
       size: 12,
       font: jpFont,
     });
-  });
-
-  page.drawText("※ご入金確認後、サービスセットアップを開始いたします。", {
-    x: LEFT,
-    y: 45,
-    size: 12,
-    font: jpFont,
-    color: rgb(0.45, 0.45, 0.45),
   });
 
   return pdfDoc.save();

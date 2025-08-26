@@ -50,12 +50,13 @@ export default function NavBar() {
       </nav>
 
       {/* オーバーレイ */}
-      {menuOpen && (
-        <div
-          className="fixed inset-0 bg-black bg-opacity-30 z-40"
-          onClick={toggleMenu}
-        />
-      )}
+     {menuOpen && (
+  <div
+    className="fixed inset-0 right-64 z-[55] bg-white/30 backdrop-blur-sm backdrop-saturate-150 transition-opacity"
+    onClick={toggleMenu}
+    aria-hidden
+  />
+)}
 
       {/* ドロワーメニュー */}
       <div

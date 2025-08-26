@@ -17,8 +17,7 @@ const {
 } = process.env;
 
 const INVOICE_ID = "T4120001209252";
-const baseUrl =
-  process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
+const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
 
 export async function POST(req: NextRequest) {
   console.log("CLIENT_ID:", process.env.GOOGLE_CLIENT_ID);
@@ -32,14 +31,22 @@ export async function POST(req: NextRequest) {
       dueDate,
       setupSelected,
       shootingSelected,
+      satueiSelected,
+      henshuSelected,
     } = await req.json();
 
-    if (!to || !name || (!setupSelected && !shootingSelected)) {
+    if (
+      !to ||
+      !name ||
+      !(setupSelected || shootingSelected || satueiSelected || henshuSelected)
+    ) {
       return NextResponse.json({ error: "Bad request" }, { status: 400 });
     }
 
     const setupPrice = 30000;
     const shootingPrice = 50000;
+    const satueiPrice = 35000;
+    const henshuPrice = 15000;
 
     const now = new Date();
     const invDate = invoiceDate ?? now.toLocaleDateString("ja-JP");
@@ -55,6 +62,10 @@ export async function POST(req: NextRequest) {
       shootingSelected,
       setupPrice,
       shootingPrice,
+      satueiSelected,
+      henshuSelected,
+      satueiPrice,
+      henshuPrice,
       invoiceNumber: INVOICE_ID,
       invoiceDate: invDate,
       dueDate: dueDateJP,
@@ -84,7 +95,7 @@ export async function POST(req: NextRequest) {
     });
 
     await transporter.sendMail({
-      from: `Pageit運営 <${GOOGLE_SENDER_EMAIL}>`,
+      from: `Xenovant運営 <${GOOGLE_SENDER_EMAIL}>`,
       to,
       subject,
       text:

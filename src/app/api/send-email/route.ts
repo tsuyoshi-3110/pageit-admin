@@ -45,8 +45,8 @@ export async function POST(req: NextRequest) {
 
     const setupPrice = 30000;
     const shootingPrice = 50000;
-    const satueiPrice = 35000;
-    const henshuPrice = 15000;
+    const satueiPrice = 40000;
+    const henshuPrice = 10000;
 
     const now = new Date();
     const invDate = invoiceDate ?? now.toLocaleDateString("ja-JP");

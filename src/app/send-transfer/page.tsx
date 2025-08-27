@@ -24,8 +24,8 @@ export default function SendTransferPage() {
 
   const setupPrice = 30000;
   const shootingPrice = 50000;
-  const satueiPrice = 35000;
-  const henshuPrice = 15000;
+  const satueiPrice = 40000;
+  const henshuPrice = 10000;
   const amount =
     (setupSelected ? setupPrice : 0) +
     (shootingSelected ? shootingPrice : 0) +
@@ -194,14 +194,14 @@ export default function SendTransferPage() {
                 className={`${base} ${satueiSelected ? on : off}`}
                 onClick={() => setSatueiSelected((prev) => !prev)}
               >
-                撮影代行（35,000円）
+                撮影代行（40,000円）
               </Button>
 
               <Button
                 className={`${base} ${henshuSelected ? on : off}`}
                 onClick={() => setHenshuSelected((prev) => !prev)}
               >
-                編集代行（15,000円）
+                編集代行（10,000円）
               </Button>
             </>
           );

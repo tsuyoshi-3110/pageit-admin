@@ -20,7 +20,6 @@ const INVOICE_ID = "T4120001209252";
 const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
 
 export async function POST(req: NextRequest) {
-  console.log("CLIENT_ID:", process.env.GOOGLE_CLIENT_ID);
   try {
     const {
       to,
@@ -33,13 +32,14 @@ export async function POST(req: NextRequest) {
       shootingSelected,
       satueiSelected,
       henshuSelected,
+      // 追加：数量
+      setupQty = 0,
+      shootingQty = 0,
+      satueiQty = 0,
+      henshuQty = 0,
     } = await req.json();
 
-    if (
-      !to ||
-      !name ||
-      !(setupSelected || shootingSelected || satueiSelected || henshuSelected)
-    ) {
+    if (!to || !name) {
       return NextResponse.json({ error: "Bad request" }, { status: 400 });
     }
 
@@ -48,31 +48,44 @@ export async function POST(req: NextRequest) {
     const satueiPrice = 35000;
     const henshuPrice = 15000;
 
+    // items 配列に正規化（数量>0のもののみ採用）
+    const items = [
+      setupSelected && setupQty > 0
+        ? { label: "初期セットアップ", unitPrice: setupPrice, qty: Number(setupQty) }
+        : null,
+      shootingSelected && shootingQty > 0
+        ? { label: "撮影編集代行", unitPrice: shootingPrice, qty: Number(shootingQty) }
+        : null,
+      satueiSelected && satueiQty > 0
+        ? { label: "撮影代行", unitPrice: satueiPrice, qty: Number(satueiQty) }
+        : null,
+      henshuSelected && henshuQty > 0
+        ? { label: "編集代行", unitPrice: henshuPrice, qty: Number(henshuQty) }
+        : null,
+    ].filter(Boolean) as { label: string; unitPrice: number; qty: number }[];
+
+    if (items.length === 0) {
+      return NextResponse.json({ error: "No items" }, { status: 400 });
+    }
+
     const now = new Date();
     const invDate = invoiceDate ?? now.toLocaleDateString("ja-JP");
     const dueDateJP =
       dueDate ??
-      new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString(
-        "ja-JP"
-      );
+      new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString("ja-JP");
 
+    // PDF生成（新形式）
     const pdfBytes = await createInvoicePdf({
       customerName: name,
-      setupSelected,
-      shootingSelected,
-      setupPrice,
-      shootingPrice,
-      satueiSelected,
-      henshuSelected,
-      satueiPrice,
-      henshuPrice,
       invoiceNumber: INVOICE_ID,
       invoiceDate: invDate,
       dueDate: dueDateJP,
       logoPath: `${baseUrl}/images/xenoLogo.png`,
       itemIconPath: `${baseUrl}/images/logo.png`,
+      items,
     });
 
+    // Gmail OAuth2
     const oAuth2 = new google.auth.OAuth2(
       GOOGLE_CLIENT_ID,
       GOOGLE_CLIENT_SECRET,

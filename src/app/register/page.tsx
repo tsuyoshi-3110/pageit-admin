@@ -1,4 +1,4 @@
-// 修正された RegisterPage：Stripe 連携用
+// 修正された RegisterPage：Stripe 連携 + 業種登録対応
 "use client";
 
 import { useEffect, useState } from "react";
@@ -15,6 +15,24 @@ import { parsePhoneNumberFromString, AsYouType } from "libphonenumber-js";
 import validator from "validator";
 import { handleSearchAddress } from "@/lib/addressUtil";
 
+type IndustryOption = { value: string; label: string };
+
+// 業種のプリセット（必要に応じて増減OK）
+const INDUSTRY_OPTIONS: IndustryOption[] = [
+  { value: "food", label: "飲食" },
+  { value: "retail", label: "小売" },
+  { value: "beauty", label: "美容・サロン" },
+  { value: "medical", label: "医療・介護" },
+  { value: "construction", label: "建設・不動産" },
+  { value: "it", label: "IT・ソフトウェア" },
+  { value: "education", label: "教育・スクール" },
+  { value: "logistics", label: "物流・運輸" },
+  { value: "manufacturing", label: "製造" },
+  { value: "professional", label: "士業" },
+  { value: "service", label: "サービス" },
+  { value: "other", label: "その他" },
+];
+
 export default function RegisterPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -28,6 +46,10 @@ export default function RegisterPage() {
   const [postalCode, setPostalCode] = useState("");
   const [isSearchingAddress, setIsSearchingAddress] = useState(false);
 
+  // 追加：業種
+  const [industryKey, setIndustryKey] = useState<string>("");     // セレクト値
+  const [industryOther, setIndustryOther] = useState<string>(""); // その他の自由入力
+
   const router = useRouter();
 
   useEffect(() => {
@@ -38,6 +60,40 @@ export default function RegisterPage() {
   }, [router]);
 
   const handleRegister = async () => {
+    // バリデーション（簡易）
+    if (!validator.isEmail(email)) {
+      alert("メールアドレスの形式が正しくありません。");
+      return;
+    }
+    if (password.length < 6) {
+      alert("パスワードは6文字以上で入力してください。");
+      return;
+    }
+    if (!/^[a-zA-Z0-9]+$/.test(siteKey)) {
+      alert("siteKeyは半角英数字のみで入力してください。");
+      return;
+    }
+    if (!siteName.trim()) {
+      alert("サイト名を入力してください。");
+      return;
+    }
+    if (!ownerName.trim()) {
+      alert("名前（オーナー）を入力してください。");
+      return;
+    }
+    if (!industryKey) {
+      alert("業種を選択してください。");
+      return;
+    }
+    const industryName =
+      industryKey === "other"
+        ? industryOther.trim()
+        : INDUSTRY_OPTIONS.find((o) => o.value === industryKey)?.label || "";
+    if (industryKey === "other" && !industryName) {
+      alert("「その他の業種」を入力してください。");
+      return;
+    }
+
     setLoading(true);
     try {
       const ref = doc(db, "siteSettings", siteKey);
@@ -66,12 +122,10 @@ export default function RegisterPage() {
           alert("このメールアドレスはすでに登録されています。");
           return;
         }
-
         if (error === "invalid-password") {
           alert("パスワードは6文字以上で入力してください。");
           return;
         }
-
         throw new Error("Firebaseアカウントの作成に失敗しました");
       }
 
@@ -92,6 +146,8 @@ export default function RegisterPage() {
               siteKey,
               siteName,
               ownerPhone,
+              industryKey,
+              industryName,
             },
           }),
         });
@@ -105,7 +161,7 @@ export default function RegisterPage() {
         subscriptionId = json.subscriptionId;
       }
 
-      // Firestore に siteSettings を保存
+      // Firestore に siteSettings を保存（業種を含める）
       await createSiteSettings(siteKey, {
         ownerId: uid,
         siteName,
@@ -115,19 +171,14 @@ export default function RegisterPage() {
         ownerEmail: email,
         ownerPhone,
         isFreePlan,
+        industry: { key: industryKey, name: industryName }, // ← 追加
         ...(customerId && { stripeCustomerId: customerId }),
         ...(subscriptionId && { stripeSubscriptionId: subscriptionId }),
-        setupMode: false
+        setupMode: false,
       });
 
-      // メール通知（パスワード付き）
-      // await fetch("/api/send-registration-mail", {
-      //   method: "POST",
-      //   headers: { "Content-Type": "application/json" },
-      //   body: JSON.stringify({ email, password }),
-      // });
-
       alert("登録が完了しました！");
+      // 入力リセット
       setEmail("");
       setPassword("");
       setSiteKey("");
@@ -135,7 +186,10 @@ export default function RegisterPage() {
       setOwnerName("");
       setOwnerAddress("");
       setOwnerPhone("");
+      setPostalCode("");
       setIsFreePlan(false);
+      setIndustryKey("");
+      setIndustryOther("");
     } catch (e) {
       if (e instanceof FirebaseError) {
         alert(
@@ -154,6 +208,7 @@ export default function RegisterPage() {
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[calc(100vh-120px)] gap-6 p-8">
+      {/* プラン切替 */}
       <div className="flex items-center gap-2">
         <input
           type="checkbox"
@@ -169,6 +224,7 @@ export default function RegisterPage() {
           <CardTitle>アカウント登録</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {/* メール */}
           <Input
             type="email"
             placeholder="メールアドレス"
@@ -186,6 +242,8 @@ export default function RegisterPage() {
                 : "⚠️ メールアドレスの形式が不正です"}
             </p>
           )}
+
+          {/* パスワード */}
           <div className="flex gap-2">
             <Input
               type="text"
@@ -201,6 +259,8 @@ export default function RegisterPage() {
               自動生成
             </Button>
           </div>
+
+          {/* siteKey */}
           <Input
             type="text"
             placeholder="siteKey（英数字）"
@@ -220,6 +280,8 @@ export default function RegisterPage() {
                 : "⚠️ siteKeyは半角英数字のみで入力してください"}
             </p>
           )}
+
+          {/* サイト名・オーナー名 */}
           <Input
             type="text"
             placeholder="サイト名"
@@ -232,16 +294,16 @@ export default function RegisterPage() {
             value={ownerName}
             onChange={(e) => setOwnerName(e.target.value)}
           />
+
+          {/* 郵便番号 → 住所検索 */}
           <Input
             type="text"
             placeholder="郵便番号（例: 123-4567）"
             maxLength={8}
             value={postalCode}
             onChange={(e) => {
-              let input = e.target.value.replace(/[^\d]/g, ""); // 数字以外を除去
-              if (input.length > 3) {
-                input = `${input.slice(0, 3)}-${input.slice(3, 7)}`;
-              }
+              let input = e.target.value.replace(/[^\d]/g, "");
+              if (input.length > 3) input = `${input.slice(0, 3)}-${input.slice(3, 7)}`;
               setPostalCode(input);
             }}
             onBlur={() => {
@@ -264,6 +326,8 @@ export default function RegisterPage() {
             value={ownerAddress}
             onChange={(e) => setOwnerAddress(e.target.value)}
           />
+
+          {/* 電話番号 */}
           <div className="space-y-1">
             <Input
               type="tel"
@@ -271,13 +335,10 @@ export default function RegisterPage() {
               value={ownerPhone}
               onChange={(e) => {
                 const input = e.target.value;
-
-                // 入力整形（日本を想定）
                 const formatted = new AsYouType("JP").input(input);
                 setOwnerPhone(formatted);
               }}
             />
-            {/* バリデーション結果表示（任意） */}
             {ownerPhone && (
               <p className="text-sm text-gray-500">
                 {parsePhoneNumberFromString(ownerPhone, "JP")?.isValid()
@@ -286,11 +347,37 @@ export default function RegisterPage() {
               </p>
             )}
           </div>
-          <Button
-            onClick={handleRegister}
-            disabled={loading}
-            className="w-full"
-          >
+
+          {/* 🆕 業種（セレクト + その他入力） */}
+          <div className="space-y-2">
+            <label className="text-sm text-gray-700">業種</label>
+            <select
+              value={industryKey}
+              onChange={(e) => setIndustryKey(e.target.value)}
+              className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            >
+              <option value="" disabled>
+                選択してください
+              </option>
+              {INDUSTRY_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+
+            {industryKey === "other" && (
+              <Input
+                type="text"
+                placeholder="その他の業種を入力"
+                value={industryOther}
+                onChange={(e) => setIndustryOther(e.target.value)}
+              />
+            )}
+          </div>
+
+          {/* 登録ボタン */}
+          <Button onClick={handleRegister} disabled={loading} className="w-full">
             {loading ? "登録中..." : "登録する"}
           </Button>
         </CardContent>

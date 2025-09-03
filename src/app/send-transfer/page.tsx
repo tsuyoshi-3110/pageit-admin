@@ -44,6 +44,8 @@ export default function SendTransferPage() {
   const tax = Math.round(amount * 0.1);
   const total = amount + tax;
 
+  const REFERRAL_URL = "https://www.pageit.shop/referral";
+
   useEffect(() => {
     if (invOwnerName) setName((prev) => (prev ? prev : invOwnerName));
   }, [invOwnerName]);
@@ -145,6 +147,7 @@ export default function SendTransferPage() {
       return;
     }
 
+    // 送信メール本文（紹介制度＆URLを末尾に追記）
     const body = joinTight([
       `${trimmedName}様`,
       "",
@@ -178,6 +181,14 @@ export default function SendTransferPage() {
       "ご不明な点などございましたら、お気軽にご返信ください。",
       "【Xenovant 運営】",
       "メール：pageitstore@gmail.com",
+      "",
+      "――――――――――――――――――",
+      "👥 紹介制度（ご成約で1万円）",
+      "・対象：新規のお客様（既存・過去問い合わせ済みは対象外）",
+      "・お支払い：成約確認・弊社入金確認・クーリングオフ期間経過後、原則7日以内にお振り込み",
+      "・複数件OK：成約件数分お支払い",
+      "※ 紹介先はお問い合わせ時に「紹介者名」を記載してください。",
+      `詳細・申請フォーム：${REFERRAL_URL}`,
     ]);
 
     try {
@@ -260,7 +271,7 @@ export default function SendTransferPage() {
             qty={setupQty}
             setQty={setSetupQty}
           />
-          <ItemRow
+        <ItemRow
             label="撮影編集代行"
             price={shootingPrice}
             selected={shootingSelected}
@@ -291,6 +302,8 @@ export default function SendTransferPage() {
           <p>消費税　　：{tax.toLocaleString()}円</p>
           <p className="font-semibold">税込合計　：{total.toLocaleString()}円</p>
         </div>
+
+       
 
         <Button onClick={handleSend} disabled={sending || sent}>
           {sending ? "送信中..." : sent ? "送信済み" : "振込案内を送信"}

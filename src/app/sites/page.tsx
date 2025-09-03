@@ -23,7 +23,6 @@ import {
   Loader2,
   Mail,
   AlertTriangle,
-  CheckCircle2,
   XCircle,
   Link as LinkIcon,
   Search,
@@ -31,6 +30,7 @@ import {
   Phone,
   MapPin,
   AtSign,
+  CheckCircle2,
 } from "lucide-react";
 import { useRouter as useNextRouter } from "next/navigation";
 import { useSetAtom } from "jotai";
@@ -69,7 +69,43 @@ type TransferLog = {
   id: string;
   email: string;
   collected?: boolean;
+  timestamp?: Date | Timestamp; // ★ 追加：送信時刻
 };
+
+/* ───────── ヘルパー ───────── */
+function toJSDate(t?: Date | Timestamp): Date | undefined {
+  if (!t) return undefined;
+
+  // Firestore Timestamp の場合
+  if (t instanceof Timestamp) {
+    return t.toDate();
+  }
+
+  // Date の場合
+  if (t instanceof Date) {
+    return t;
+  }
+
+  return undefined;
+}
+
+
+
+function daysAgoString(date?: Date): string {
+  if (!date) return "-";
+  const ms = Date.now() - date.getTime();
+  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
+  if (days <= 0) return "本日";
+  return `${days}日前`;
+}
+
+function formatYMD(date?: Date): string {
+  if (!date) return "";
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
 
 export default function SiteListPage() {
   const [sites, setSites] = useState<Site[]>([]);
@@ -84,8 +120,9 @@ export default function SiteListPage() {
   const [editOwnerAddress, setEditOwnerAddress] = useState("");
   const [searchKeyword, setSearchKeyword] = useState("");
 
+  // ★ 変更：collected に加え lastSentAt を保持
   const [transferLogMap, setTransferLogMap] = useState<
-    Map<string, { collected: boolean }>
+    Map<string, { collected: boolean; lastSentAt?: Date }>
   >(new Map());
 
   const [credentialsSentMap, setCredentialsSentMap] = useState<
@@ -268,9 +305,11 @@ export default function SiteListPage() {
     const isSent = credentialsSentMap.get(email) === true;
     const isPaidPlan =
       paymentStatus === "active" || paymentStatus === "pending_cancel";
-    const isCollected = transferLogMap.get(email)?.collected === true;
+
+
 
     // 無料プラン＝常に表示 / 有料プラン＝集金済みのみ表示
+    const isCollected = transferLogMap.get(email)?.collected === true;
     if (!isFreePlan && !(isPaidPlan && isCollected)) return null;
 
     return (
@@ -281,6 +320,9 @@ export default function SiteListPage() {
             ログイン情報送信済み
           </span>
         )}
+
+
+
         <Button
           className="cursor-pointer"
           size="sm"
@@ -302,13 +344,30 @@ export default function SiteListPage() {
     })) as TransferLog[];
   };
 
+  // ★ 変更：email ごとに「最新送信日時」を集計
   const mapTransferLogsByEmail = (
     logs: TransferLog[]
-  ): Map<string, { collected: boolean }> => {
-    const map = new Map<string, { collected: boolean }>();
+  ): Map<string, { collected: boolean; lastSentAt?: Date }> => {
+    const map = new Map<string, { collected: boolean; lastSentAt?: Date }>();
+
     logs.forEach((log) => {
-      if (log.email) map.set(log.email, { collected: log.collected ?? false });
+      if (!log.email) return;
+      const prev = map.get(log.email) ?? { collected: log.collected ?? false };
+      const currentSentAt = toJSDate(log.timestamp);
+
+      const next: { collected: boolean; lastSentAt?: Date } = {
+        collected: prev.collected || false || (log.collected ?? false),
+        lastSentAt: prev.lastSentAt,
+      };
+      if (currentSentAt) {
+        if (!prev.lastSentAt || currentSentAt > prev.lastSentAt) {
+          next.lastSentAt = currentSentAt; // ← constでもOK（再代入していない）
+        }
+      }
+
+      map.set(log.email, next);
     });
+
     return map;
   };
 
@@ -334,29 +393,43 @@ export default function SiteListPage() {
     nextRouter.push(`/send-transfer`);
   };
 
+  // ★ 変更：集金バッジの横に「送信 X日前」を常に表示
   const renderTransferStatus = (
     email: string | undefined,
-    map: Map<string, { collected: boolean }>,
+    map: Map<string, { collected: boolean; lastSentAt?: Date }>,
     onClick: (email: string) => void
   ) => {
     if (!email) return null;
-    const log = map.get(email);
-    if (!log) return null;
+    const info = map.get(email);
+    if (!info) return null;
 
-    return log.collected ? (
-      <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded text-xs font-medium">
-        <CheckCircle2 size={14} />
-        集金済み
-      </span>
-    ) : (
-      <Button
-        className="cursor-pointer"
-        size="sm"
-        variant="outline"
-        onClick={() => onClick(email)}
-      >
-        💰 集金確認
-      </Button>
+    return (
+      <div className="flex items-center gap-2">
+        {info.collected ? (
+          <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded text-xs font-medium">
+            <CheckCircle2 size={14} />
+            集金済み
+          </span>
+        ) : (
+          <Button
+            className="cursor-pointer"
+            size="sm"
+            variant="outline"
+            onClick={() => onClick(email)}
+          >
+            💰 集金確認
+          </Button>
+        )}
+
+        {info.lastSentAt && !info.collected &&(
+          <span
+            className="inline-flex items-center gap-1 text-violet-700 bg-violet-100 px-2 py-0.5 rounded text-xs font-medium"
+            title={`最終送信日：${formatYMD(info.lastSentAt)}`}
+          >
+            📅 送信 {daysAgoString(info.lastSentAt)}
+          </span>
+        )}
+      </div>
     );
   };
 
@@ -687,7 +760,14 @@ export default function SiteListPage() {
                         await updateCollectedStatus(email);
                         setTransferLogMap(
                           (prev) =>
-                            new Map(prev.set(email, { collected: true }))
+                            new Map(
+                              prev.set(email, {
+                                ...(prev.get(email) ?? {
+                                  lastSentAt: undefined,
+                                }),
+                                collected: true,
+                              })
+                            )
                         );
                       }
                     )}

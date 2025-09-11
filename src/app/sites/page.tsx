@@ -1,14 +1,15 @@
+// components/.../SiteListPage.tsx
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   collection,
-  getDocs,
-  updateDoc,
-  doc,
   deleteDoc,
-  Timestamp,
+  doc,
+  getDocs,
   query,
+  Timestamp,
+  updateDoc,
   where,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
@@ -20,17 +21,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import clsx from "clsx";
 import {
+  AlertTriangle,
+  AtSign,
+  Briefcase,
+  CheckCircle2,
+  Link as LinkIcon,
   Loader2,
   Mail,
-  AlertTriangle,
-  XCircle,
-  Link as LinkIcon,
+  MapPin,
+  Phone,
   Search,
   User,
-  Phone,
-  MapPin,
-  AtSign,
-  CheckCircle2,
+  XCircle,
 } from "lucide-react";
 import { useRouter as useNextRouter } from "next/navigation";
 import { useSetAtom } from "jotai";
@@ -39,6 +41,23 @@ import {
   invEmailAtom,
   invOwnerNameAtom,
 } from "@/lib/atoms/openFlagAtom";
+
+/* ───────── 業種オプション（RegisterPageと同一） ───────── */
+type IndustryOption = { value: string; label: string };
+const INDUSTRY_OPTIONS: IndustryOption[] = [
+  { value: "food", label: "飲食" },
+  { value: "retail", label: "小売" },
+  { value: "beauty", label: "美容・サロン" },
+  { value: "medical", label: "医療・介護" },
+  { value: "construction", label: "建設・不動産" },
+  { value: "it", label: "IT・ソフトウェア" },
+  { value: "education", label: "教育・スクール" },
+  { value: "logistics", label: "物流・運輸" },
+  { value: "manufacturing", label: "製造" },
+  { value: "professional", label: "士業" },
+  { value: "service", label: "サービス" },
+  { value: "other", label: "その他" },
+];
 
 /* ───────── 型 ───────── */
 type PaymentStatus =
@@ -63,42 +82,35 @@ type Site = {
   paymentStatus?: PaymentStatus;
   setupMode?: boolean;
   isFreePlan?: boolean;
+
+  // 業種
+  industry?: { key: string; name: string };
+
+  // ロゴ（どちらかがあればOK）
+  headerLogoUrl?: string; // 文字列URL
+  headerLogo?: string | { url?: string }; // 文字列 or { url }
 };
 
 type TransferLog = {
   id: string;
   email: string;
   collected?: boolean;
-  timestamp?: Date | Timestamp; // ★ 追加：送信時刻
+  timestamp?: Date | Timestamp;
 };
 
 /* ───────── ヘルパー ───────── */
 function toJSDate(t?: Date | Timestamp): Date | undefined {
   if (!t) return undefined;
-
-  // Firestore Timestamp の場合
-  if (t instanceof Timestamp) {
-    return t.toDate();
-  }
-
-  // Date の場合
-  if (t instanceof Date) {
-    return t;
-  }
-
+  if (t instanceof Timestamp) return t.toDate();
+  if (t instanceof Date) return t;
   return undefined;
 }
-
-
-
 function daysAgoString(date?: Date): string {
   if (!date) return "-";
   const ms = Date.now() - date.getTime();
   const days = Math.floor(ms / (1000 * 60 * 60 * 24));
-  if (days <= 0) return "本日";
-  return `${days}日前`;
+  return days <= 0 ? "本日" : `${days}日前`;
 }
-
 function formatYMD(date?: Date): string {
   if (!date) return "";
   const y = date.getFullYear();
@@ -109,33 +121,40 @@ function formatYMD(date?: Date): string {
 
 export default function SiteListPage() {
   const [sites, setSites] = useState<Site[]>([]);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [homepageInput, setHomepageInput] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // URL 編集
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [homepageInput, setHomepageInput] = useState("");
+
+  // 情報編集
   const [editingInfoId, setEditingInfoId] = useState<string | null>(null);
   const [editSiteName, setEditSiteName] = useState("");
   const [editOwnerName, setEditOwnerName] = useState("");
   const [editOwnerPhone, setEditOwnerPhone] = useState("");
   const [editOwnerAddress, setEditOwnerAddress] = useState("");
-  const [searchKeyword, setSearchKeyword] = useState("");
 
-  // ★ 変更：collected に加え lastSentAt を保持
+  // 業種編集
+  const [editIndustryKey, setEditIndustryKey] = useState<string>("");
+  const [editIndustryOther, setEditIndustryOther] = useState<string>("");
+
+  // 検索 & フィルタ
+  const [searchKeyword, setSearchKeyword] = useState("");
+  type FilterMode = "all" | "paid" | "free" | "unpaid";
+  const [filterMode, setFilterMode] = useState<FilterMode>("all");
+
+  // 集金・ログイン情報
   const [transferLogMap, setTransferLogMap] = useState<
     Map<string, { collected: boolean; lastSentAt?: Date }>
   >(new Map());
-
   const [credentialsSentMap, setCredentialsSentMap] = useState<
     Map<string, boolean>
   >(new Map());
 
-  // ▼ 追加：フィルターモード
-  type FilterMode = "all" | "paid" | "free" | "unpaid";
-  const [filterMode, setFilterMode] = useState<FilterMode>("all");
-
   const setOwnerName = useSetAtom(invOwnerNameAtom);
   const setInvEmail = useSetAtom(invEmailAtom);
   const setEmail = useSetAtom(credentialsEmailAtom);
+
   const router = useRouter();
   const nextRouter = useNextRouter();
 
@@ -145,47 +164,77 @@ export default function SiteListPage() {
         router.push("/login");
         return;
       }
+      setLoading(true);
+      try {
+        // base: siteSettings と editable: siteSettingsEditable を取得
+        const [baseSnap, editableSnap] = await Promise.all([
+          getDocs(collection(db, "siteSettings")),
+          getDocs(collection(db, "siteSettingsEditable")).catch(() => null),
+        ]);
 
-      const snap = await getDocs(collection(db, "siteSettings"));
-      const rawList = snap.docs.map((d) => ({
-        id: d.id,
-        ...d.data(),
-      })) as Site[];
-
-      const listWithStatus: Site[] = await Promise.all(
-        rawList.map(async (site) => {
-          try {
-            setLoading(true);
-            const res = await fetch(
-              `/api/stripe/check-subscription?siteKey=${site.id}`
-            );
-            const { status } = (await res.json()) as {
-              status: PaymentStatus;
-            };
-            return { ...site, paymentStatus: status };
-          } catch {
-            return { ...site, paymentStatus: "none" };
-          } finally {
-            setLoading(false);
+        // editable 側のロゴ情報を map 化（key は doc.id 優先、無ければ data.siteKey）
+        const editsLogoMap = new Map<
+          string,
+          { headerLogoUrl?: string; headerLogo?: string | { url?: string } }
+        >();
+        editableSnap?.docs.forEach((d) => {
+          const data: any = d.data();
+          const key = d.id || data?.siteKey;
+          const urlCandidate =
+            data?.headerLogoUrl ??
+            (typeof data?.headerLogo === "object"
+              ? data?.headerLogo?.url
+              : data?.headerLogo);
+          if (key) {
+            editsLogoMap.set(key, {
+              headerLogoUrl:
+                typeof urlCandidate === "string" ? urlCandidate : undefined,
+              headerLogo: data?.headerLogo ?? urlCandidate,
+            });
           }
-        })
-      );
+        });
 
-      setSites(listWithStatus);
+        // ベース一覧に editable のロゴをマージ
+        const baseList: Site[] = baseSnap.docs.map((d) => {
+          const base = { id: d.id, ...d.data() } as Site;
+          const extra = editsLogoMap.get(d.id) ?? null;
+          return extra ? { ...base, ...extra } : base;
+        });
 
-      // ログイン情報送信ログの取得
-      await fetchCredentialsSentLogs();
+        // Stripe ステータス付与
+        const withStatus: Site[] = await Promise.all(
+          baseList.map(async (site) => {
+            try {
+              const res = await fetch(
+                `/api/stripe/check-subscription?siteKey=${site.id}`
+              );
+              const { status } = (await res.json()) as {
+                status: PaymentStatus;
+              };
+              return { ...site, paymentStatus: status };
+            } catch {
+              return { ...site, paymentStatus: "none" };
+            }
+          })
+        );
 
-      // 既存の transferLogs 読み込み
-      const logs = await fetchTransferLogs();
-      const map = mapTransferLogsByEmail(logs);
-      setTransferLogMap(map);
+        setSites(withStatus);
+
+        // ログイン情報送信ログ
+        await fetchCredentialsSentLogs();
+
+        // 集金ログ
+        const logs = await fetchTransferLogs();
+        setTransferLogMap(mapTransferLogsByEmail(logs));
+      } finally {
+        setLoading(false);
+      }
     });
 
     return () => unsub();
   }, [router]);
 
-  // 未払い扱いにするステータス（Stripeの代表的な未払い系も網羅）
+  /* ───────── 料金系 ───────── */
   const UNPAID_STATUSES: PaymentStatus[] = [
     "none",
     "canceled",
@@ -195,7 +244,6 @@ export default function SiteListPage() {
     "unpaid",
   ];
 
-  // カウント
   const paidCount = useMemo(
     () =>
       sites.filter(
@@ -204,12 +252,10 @@ export default function SiteListPage() {
       ).length,
     [sites]
   );
-
   const freeCount = useMemo(
     () => sites.filter((s) => s.isFreePlan === true).length,
     [sites]
   );
-
   const unpaidCount = useMemo(
     () =>
       sites.filter(
@@ -220,11 +266,9 @@ export default function SiteListPage() {
       ).length,
     [sites]
   );
-
-  // ▼ 計は総件数
   const totalCount = useMemo(() => sites.length, [sites]);
 
-  // ▼ フィルター済みリスト（モード + キーワード）
+  /* ───────── フィルタ & 検索 ───────── */
   const filteredSites = sites
     .filter((site) => {
       switch (filterMode) {
@@ -256,6 +300,7 @@ export default function SiteListPage() {
     })
     .sort((a, b) => (a.ownerName ?? "").localeCompare(b.ownerName ?? "", "ja"));
 
+  /* ───────── 小物関数（コンポーネント内に置く） ───────── */
   const renderSetupModeToggle = (
     siteId: string,
     current: boolean | undefined
@@ -266,7 +311,6 @@ export default function SiteListPage() {
         setupMode: newVal,
         updatedAt: Timestamp.now(),
       });
-
       setSites((prev) =>
         prev.map((s) => (s.id === siteId ? { ...s, setupMode: newVal } : s))
       );
@@ -294,48 +338,6 @@ export default function SiteListPage() {
     setCredentialsSentMap(map);
   };
 
-  // 無料プラン判定は paymentStatus ではなく isFreePlan を使用
-  const renderCredentialsStatus = (
-    email: string | undefined,
-    isFreePlan: boolean,
-    paymentStatus: PaymentStatus | undefined
-  ) => {
-    if (!email) return null;
-
-    const isSent = credentialsSentMap.get(email) === true;
-    const isPaidPlan =
-      paymentStatus === "active" || paymentStatus === "pending_cancel";
-
-
-
-    // 無料プラン＝常に表示 / 有料プラン＝集金済みのみ表示
-    const isCollected = transferLogMap.get(email)?.collected === true;
-    if (!isFreePlan && !(isPaidPlan && isCollected)) return null;
-
-    return (
-      <div className="flex items-center gap-2">
-        {isSent && (
-          <span className="inline-flex items-center gap-1 text-blue-700 bg-blue-100 px-2 py-0.5 rounded text-xs font-medium">
-            <Mail size={14} />
-            ログイン情報送信済み
-          </span>
-        )}
-
-
-
-        <Button
-          className="cursor-pointer"
-          size="sm"
-          variant="default"
-          onClick={() => handleSendCredentials(email)}
-        >
-          <Mail className="mr-1.5 h-4 w-4" />
-          ログイン情報送信
-        </Button>
-      </div>
-    );
-  };
-
   const fetchTransferLogs = async (): Promise<TransferLog[]> => {
     const snap = await getDocs(collection(db, "transferLogs"));
     return snap.docs.map((doc) => ({
@@ -344,12 +346,10 @@ export default function SiteListPage() {
     })) as TransferLog[];
   };
 
-  // ★ 変更：email ごとに「最新送信日時」を集計
   const mapTransferLogsByEmail = (
     logs: TransferLog[]
   ): Map<string, { collected: boolean; lastSentAt?: Date }> => {
     const map = new Map<string, { collected: boolean; lastSentAt?: Date }>();
-
     logs.forEach((log) => {
       if (!log.email) return;
       const prev = map.get(log.email) ?? { collected: log.collected ?? false };
@@ -361,22 +361,20 @@ export default function SiteListPage() {
       };
       if (currentSentAt) {
         if (!prev.lastSentAt || currentSentAt > prev.lastSentAt) {
-          next.lastSentAt = currentSentAt; // ← constでもOK（再代入していない）
+          next.lastSentAt = currentSentAt;
         }
       }
-
       map.set(log.email, next);
     });
-
     return map;
   };
 
   const updateCollectedStatus = async (email: string) => {
-    const q = query(
+    const q_ = query(
       collection(db, "transferLogs"),
       where("email", "==", email)
     );
-    const snap = await getDocs(q);
+    const snap = await getDocs(q_);
     for (const docRef of snap.docs) {
       await updateDoc(docRef.ref, { collected: true });
     }
@@ -393,7 +391,6 @@ export default function SiteListPage() {
     nextRouter.push(`/send-transfer`);
   };
 
-  // ★ 変更：集金バッジの横に「送信 X日前」を常に表示
   const renderTransferStatus = (
     email: string | undefined,
     map: Map<string, { collected: boolean; lastSentAt?: Date }>,
@@ -421,7 +418,7 @@ export default function SiteListPage() {
           </Button>
         )}
 
-        {info.lastSentAt && !info.collected &&(
+        {info.lastSentAt && !info.collected && (
           <span
             className="inline-flex items-center gap-1 text-violet-700 bg-violet-100 px-2 py-0.5 rounded text-xs font-medium"
             title={`最終送信日：${formatYMD(info.lastSentAt)}`}
@@ -429,6 +426,43 @@ export default function SiteListPage() {
             📅 送信 {daysAgoString(info.lastSentAt)}
           </span>
         )}
+      </div>
+    );
+  };
+
+  // ✅ ここで credentialsSentMap と handleSendCredentials を参照（未使用警告を解消）
+  const renderCredentialsStatus = (
+    email: string | undefined,
+    isFreePlan: boolean,
+    paymentStatus: PaymentStatus | undefined
+  ) => {
+    if (!email) return null;
+
+    const isSent = credentialsSentMap.get(email) === true;
+    const isPaidPlan =
+      paymentStatus === "active" || paymentStatus === "pending_cancel";
+
+    // 無料プラン＝常に表示 / 有料プラン＝集金済みのみ表示
+    const isCollected = transferLogMap.get(email)?.collected === true;
+    if (!isFreePlan && !(isPaidPlan && isCollected)) return null;
+
+    return (
+      <div className="flex items-center gap-2">
+        {isSent && (
+          <span className="inline-flex items-center gap-1 text-blue-700 bg-blue-100 px-2 py-0.5 rounded text-xs font-medium">
+            <Mail size={14} />
+            ログイン情報送信済み
+          </span>
+        )}
+        <Button
+          className="cursor-pointer"
+          size="sm"
+          variant="default"
+          onClick={() => handleSendCredentials(email)}
+        >
+          <Mail className="mr-1.5 h-4 w-4" />
+          ログイン情報送信
+        </Button>
       </div>
     );
   };
@@ -449,15 +483,12 @@ export default function SiteListPage() {
 
   const handleCancel = async (siteId: string) => {
     if (!confirm("本当に解約しますか？次回請求以降課金されません。")) return;
-
     const res = await fetch("/api/stripe/cancel-subscription", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ siteKey: siteId }),
     });
-
     if (!res.ok) return alert("解約に失敗しました");
-
     setSites((p) =>
       p.map((s) => (s.id === siteId ? { ...s, cancelPending: true } : s))
     );
@@ -466,7 +497,6 @@ export default function SiteListPage() {
   const handleDelete = async (siteId: string) => {
     if (!confirm("本当にこのサイトを削除しますか？この操作は取り消せません。"))
       return;
-
     try {
       await deleteDoc(doc(db, "siteSettings", siteId));
       setSites((prev) => prev.filter((s) => s.id !== siteId));
@@ -477,11 +507,20 @@ export default function SiteListPage() {
   };
 
   const handleUpdateInfo = async (siteId: string) => {
+    const industryName =
+      editIndustryKey === "other"
+        ? editIndustryOther.trim()
+        : INDUSTRY_OPTIONS.find((o) => o.value === editIndustryKey)?.label ||
+          "";
+
     await updateDoc(doc(db, "siteSettings", siteId), {
       siteName: editSiteName,
       ownerName: editOwnerName,
       ownerPhone: editOwnerPhone,
       ownerAddress: editOwnerAddress,
+      industry: editIndustryKey
+        ? { key: editIndustryKey, name: industryName }
+        : null,
       updatedAt: Timestamp.now(),
     });
 
@@ -494,6 +533,9 @@ export default function SiteListPage() {
               ownerName: editOwnerName,
               ownerPhone: editOwnerPhone,
               ownerAddress: editOwnerAddress,
+              industry: editIndustryKey
+                ? { key: editIndustryKey, name: industryName }
+                : undefined,
             }
           : s
       )
@@ -501,7 +543,6 @@ export default function SiteListPage() {
     setEditingInfoId(null);
   };
 
-  // バッジ共通クラス
   const badgeBtn = (
     active: boolean,
     baseClasses: string,
@@ -512,6 +553,7 @@ export default function SiteListPage() {
       active ? activeClasses : baseClasses
     );
 
+  /* ───────── Render ───────── */
   return (
     <div className="max-w-3xl mx-auto px-4 pt-10 space-y-4">
       {/* 上部サマリー */}
@@ -519,7 +561,6 @@ export default function SiteListPage() {
         <div className="flex items-center justify-between">
           <h1 className="text-xl md:text-2xl font-bold">サイト一覧</h1>
           <div className="flex items-center gap-2 text-sm">
-            {/* 有料 */}
             <button
               type="button"
               onClick={() =>
@@ -535,7 +576,6 @@ export default function SiteListPage() {
               有料 {paidCount}
             </button>
 
-            {/* 無料 */}
             <button
               type="button"
               onClick={() =>
@@ -551,7 +591,6 @@ export default function SiteListPage() {
               無料 {freeCount}
             </button>
 
-            {/* 未払い */}
             <button
               type="button"
               onClick={() =>
@@ -569,7 +608,6 @@ export default function SiteListPage() {
               未払い {unpaidCount}
             </button>
 
-            {/* 計（全件表示に戻す） */}
             <button
               type="button"
               onClick={() => setFilterMode("all")}
@@ -632,6 +670,25 @@ export default function SiteListPage() {
             !!site.paymentStatus &&
             UNPAID_STATUSES.includes(site.paymentStatus);
 
+          const industryDisplay =
+            (site.industry?.name && site.industry.name.trim()) ||
+            (site.industry?.key
+              ? INDUSTRY_OPTIONS.find((o) => o.value === site.industry!.key)
+                  ?.label || ""
+              : "") ||
+            "-";
+
+          // ロゴURLを決定
+          const logoSrc =
+            site.headerLogoUrl ||
+            (typeof site.headerLogo === "object"
+              ? site.headerLogo?.url
+              : undefined) ||
+            (typeof site.headerLogo === "string"
+              ? site.headerLogo
+              : undefined) ||
+            null;
+
           return (
             <Card
               key={site.id}
@@ -671,7 +728,36 @@ export default function SiteListPage() {
                     onChange={(e) => setEditOwnerAddress(e.target.value)}
                   />
                   <Input value={site.ownerEmail ?? ""} disabled />
-                  <div className="flex gap-2">
+
+                  {/* 業種（RegisterPageと同じUI） */}
+                  <div className="space-y-2 pt-1">
+                    <label className="text-sm text-gray-700">業種</label>
+                    <select
+                      value={editIndustryKey}
+                      onChange={(e) => setEditIndustryKey(e.target.value)}
+                      className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+                    >
+                      <option value="" disabled>
+                        選択してください
+                      </option>
+                      {INDUSTRY_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+
+                    {editIndustryKey === "other" && (
+                      <Input
+                        type="text"
+                        placeholder="その他の業種を入力"
+                        value={editIndustryOther}
+                        onChange={(e) => setEditIndustryOther(e.target.value)}
+                      />
+                    )}
+                  </div>
+
+                  <div className="flex gap-2 pt-1">
                     <Button onClick={() => handleUpdateInfo(site.id)}>
                       保存
                     </Button>
@@ -688,6 +774,19 @@ export default function SiteListPage() {
                   {/* タイトル行 */}
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2 min-w-0">
+                      {logoSrc && (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={logoSrc}
+                          alt=""
+                          className="h-8 w-8 rounded bg-white object-contain border border-gray-200"
+                          onError={(e) => {
+                            (
+                              e.currentTarget as HTMLImageElement
+                            ).style.display = "none";
+                          }}
+                        />
+                      )}
                       {site.isFreePlan && (
                         <span className="px-2 py-0.5 text-xs rounded bg-blue-500 text-white">
                           無料
@@ -747,6 +846,14 @@ export default function SiteListPage() {
                       <dt className="text-gray-500">メール</dt>
                       <dd className="ml-auto sm:ml-2 font-medium truncate">
                         {site.ownerEmail || "-"}
+                      </dd>
+                    </div>
+                    {/* 業種表示 */}
+                    <div className="flex items-center gap-2 sm:col-span-2">
+                      <Briefcase className="h-4 w-4 text-gray-500" />
+                      <dt className="text-gray-500">業種</dt>
+                      <dd className="ml-auto sm:ml-2 font-medium truncate">
+                        {industryDisplay}
                       </dd>
                     </div>
                   </dl>
@@ -840,15 +947,20 @@ export default function SiteListPage() {
                   {renderSetupModeToggle(site.id, site.setupMode)}
 
                   <Button
-                    className="cursor-pointer"
+                    className="cursor-pointer bg-orange-500 hover:bg-orange-600 text-white focus-visible:ring-2 focus-visible:ring-orange-500"
                     size="sm"
-                    variant="secondary"
+                    variant="default"
                     onClick={() => {
                       setEditingInfoId(site.id);
                       setEditSiteName(site.siteName);
                       setEditOwnerName(site.ownerName);
                       setEditOwnerPhone(site.ownerPhone);
                       setEditOwnerAddress(site.ownerAddress ?? "");
+                      const k = site.industry?.key ?? "";
+                      setEditIndustryKey(k);
+                      setEditIndustryOther(
+                        k === "other" ? site.industry?.name ?? "" : ""
+                      );
                     }}
                   >
                     ✏ オーナー情報を編集

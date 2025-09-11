@@ -1,3 +1,4 @@
+// app/(whatever)/login/page.tsx など
 "use client";
 
 import { useEffect, useState } from "react";
@@ -8,7 +9,8 @@ import {
   User,
 } from "firebase/auth";
 import { FirebaseError } from "firebase/app";
-import { auth } from "../../lib/firebase";
+import { auth, db } from "../../lib/firebase";
+import { doc, getDoc } from "firebase/firestore";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -20,25 +22,66 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
   const [user, setUser] = useState<User | null>(null);
+  const [checkingAuth, setCheckingAuth] = useState(true); // 権限チェック中のフラグ
   const [dark, setDark] = useState(false);
 
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
-      setUser(firebaseUser);
-    });
-    return () => unsub();
-  }, []);
-
+  // テーマ
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
+
+  // 認証状態 + 管理者チェック
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+      setCheckingAuth(true);
+      if (!firebaseUser) {
+        setUser(null);
+        setCheckingAuth(false);
+        return;
+      }
+      try {
+        const adminRef = doc(db, "admins", firebaseUser.uid);
+        const adminSnap = await getDoc(adminRef);
+        if (adminSnap.exists()) {
+          setUser(firebaseUser);
+        } else {
+          // 管理者でなければログアウトさせる
+          await signOut(auth);
+          setUser(null);
+          setError("このアカウントには管理者権限がありません。");
+        }
+      } catch {
+        await signOut(auth);
+        setUser(null);
+        setError("権限の確認に失敗しました。時間をおいて再度お試しください。");
+      } finally {
+        setCheckingAuth(false);
+      }
+    });
+    return () => unsub();
+  }, []);
 
   const handleLogin = async () => {
     setLoading(true);
     setError("");
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      const cred = await signInWithEmailAndPassword(auth, email, password);
+      const uid = cred.user.uid;
+
+      // ここで admins/{uid} の存在チェック
+      const adminRef = doc(db, "admins", uid);
+      const adminSnap = await getDoc(adminRef);
+      if (!adminSnap.exists()) {
+        await signOut(auth);
+        setUser(null);
+        setError("このアカウントには管理者権限がありません。");
+        return;
+      }
+
+      // OK（onAuthStateChanged側でもセットされるが念のため）
+      setUser(cred.user);
     } catch (err) {
       if (err instanceof FirebaseError) {
         switch (err.code) {
@@ -64,8 +107,19 @@ export default function LoginPage() {
 
   const handleLogout = async () => {
     await signOut(auth);
+    setUser(null);
   };
 
+  // 権限チェック中は空表示（必要ならローディングUIを）
+  if (checkingAuth) {
+    return (
+      <div className="flex items-center justify-center min-h-[calc(100vh-120px)] p-8 text-sm text-gray-500">
+        権限を確認中…
+      </div>
+    );
+  }
+
+  // ログイン後（管理者のみここに来る）
   if (user) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[calc(100vh-120px)] gap-6 p-8">
@@ -92,6 +146,7 @@ export default function LoginPage() {
     );
   }
 
+  // 未ログイン or 非管理者
   return (
     <div className="flex flex-col items-center justify-center min-h-[calc(100vh-120px)] gap-6 p-8">
       <Card className="w-full max-w-md shadow-xl">

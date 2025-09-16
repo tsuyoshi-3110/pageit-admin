@@ -10,6 +10,15 @@ import { invEmailAtom, invOwnerNameAtom } from "@/lib/atoms/openFlagAtom";
 
 type ProductKey = "setup" | "shooting" | "satuei" | "henshu" | "full";
 
+// 価格
+const PRICES: Record<ProductKey, number> = {
+  setup: 30000, // 初期設定
+  shooting: 50000, // 撮影編集代行
+  satuei: 35000, // 撮影代行
+  henshu: 15000, // 編集代行
+  full: 80000, // フルセット（必要に応じて調整OK）
+};
+
 export default function SendTransferPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -32,15 +41,6 @@ export default function SendTransferPage() {
 
   const invEmail = useAtomValue(invEmailAtom);
   const invOwnerName = useAtomValue(invOwnerNameAtom);
-
-  // 価格
-  const PRICES: Record<ProductKey, number> = {
-    setup: 30000,   // 初期設定
-    shooting: 50000, // 撮影編集代行
-    satuei: 35000,  // 撮影代行
-    henshu: 15000,  // 編集代行
-    full: 80000,    // フルセット（必要に応じて調整OK）
-  };
 
   // 表示名
   const LABELS: Record<ProductKey, string> = {
@@ -75,7 +75,8 @@ export default function SendTransferPage() {
       .filter((l) => l !== false && l !== null && l !== undefined)
       .reduce<string[]>((acc, raw) => {
         const line = String(raw);
-        if (line.trim() === "" && acc[acc.length - 1]?.trim() === "") return acc;
+        if (line.trim() === "" && acc[acc.length - 1]?.trim() === "")
+          return acc;
         acc.push(line);
         return acc;
       }, [])
@@ -83,7 +84,8 @@ export default function SendTransferPage() {
 
   const isValidEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 
-  const clampQty = (v: number) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+  const clampQty = (v: number) =>
+    Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
 
   // 金額計算（選択中のみ）
   const { subTotal, tax, total } = useMemo(() => {
@@ -91,7 +93,7 @@ export default function SendTransferPage() {
     const subtotal = PRICES[selected] * (qty[selected] || 0);
     const t = Math.round(subtotal * 0.1);
     return { subTotal: subtotal, tax: t, total: subtotal + t };
-  }, [selected, qty, PRICES]);
+  }, [selected, qty]);
 
   // 1行（ラジオ挙動）
   const ItemRow = ({ keyName }: { keyName: ProductKey }) => {
@@ -112,7 +114,8 @@ export default function SendTransferPage() {
             setSelected((prev) => (prev === keyName ? null : keyName));
             setQty((prev) => {
               const next = { ...prev };
-              if (selected !== keyName && prev[keyName] === 0) next[keyName] = 1; // 選択時に数量1を初期セット
+              if (selected !== keyName && prev[keyName] === 0)
+                next[keyName] = 1; // 選択時に数量1を初期セット
               return next;
             });
           }}
@@ -131,7 +134,10 @@ export default function SendTransferPage() {
             value={active ? qty[keyName] || "" : ""}
             placeholder={active ? "1" : "-"}
             onChange={(e) =>
-              setQty((prev) => ({ ...prev, [keyName]: clampQty(Number(e.target.value)) }))
+              setQty((prev) => ({
+                ...prev,
+                [keyName]: clampQty(Number(e.target.value)),
+              }))
             }
             className="w-20 h-10"
           />
@@ -167,7 +173,9 @@ export default function SendTransferPage() {
 
     const payLine =
       `・${label}：${link}` +
-      (selectedQty > 1 ? `（※数量を ${selectedQty} に変更してお支払いください）` : "");
+      (selectedQty > 1
+        ? `（※数量を ${selectedQty} に変更してお支払いください）`
+        : "");
 
     const body = joinTight([
       `${trimmedName}様`,
@@ -177,7 +185,9 @@ export default function SendTransferPage() {
       "以下の内容でご請求のご案内を申し上げます。",
       "",
       "【ご請求内訳】",
-      `${label}：${unitPrice.toLocaleString()}円 × ${selectedQty} ＝ ${(unitPrice * selectedQty).toLocaleString()}円`,
+      `${label}：${unitPrice.toLocaleString()}円 × ${selectedQty} ＝ ${(
+        unitPrice * selectedQty
+      ).toLocaleString()}円`,
       "",
       "【ご請求金額】",
       `税抜小計：${subTotal.toLocaleString()}円`,
@@ -265,7 +275,9 @@ export default function SendTransferPage() {
   return (
     <main className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-neutral-950 p-4">
       <div className="w-full max-w-lg p-4 space-y-4 rounded-2xl shadow bg-white dark:bg-neutral-900 border border-gray-200 dark:border-neutral-800">
-        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">請求メールの送信</h1>
+        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">
+          請求メールの送信
+        </h1>
 
         <Input
           placeholder="お客様の名前"
@@ -289,14 +301,18 @@ export default function SendTransferPage() {
         <div className="text-sm text-gray-700 dark:text-gray-300 space-y-1">
           <p>税抜小計　：{subTotal.toLocaleString()}円</p>
           <p>消費税　　：{tax.toLocaleString()}円</p>
-          <p className="font-semibold">税込合計　：{total.toLocaleString()}円</p>
+          <p className="font-semibold">
+            税込合計　：{total.toLocaleString()}円
+          </p>
         </div>
 
         <Button onClick={handleSend} disabled={sending || sent}>
           {sending ? "送信中..." : sent ? "送信済み" : "請求メールを送信"}
         </Button>
 
-        {message && <p className="text-gray-700 dark:text-gray-300">{message}</p>}
+        {message && (
+          <p className="text-gray-700 dark:text-gray-300">{message}</p>
+        )}
       </div>
     </main>
   );

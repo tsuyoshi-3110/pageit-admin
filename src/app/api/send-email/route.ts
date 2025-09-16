@@ -1,6 +1,3 @@
-/* ------------------------------------------------------------------ */
-/*  app/api/send-email/route.ts                                       */
-/* ------------------------------------------------------------------ */
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
@@ -24,34 +21,39 @@ export async function POST(req: NextRequest) {
     const {
       to,
       name,
-      subject = "【Pageit】振込のご案内",
+      subject = "【Pageit】請求書（銀行振込／カード決済のご案内）",
       body,
       invoiceDate,
       dueDate,
+
+      // 選択・数量（5商品）
       setupSelected,
-      shootingSelected,
-      satueiSelected,
-      henshuSelected,
-      // 追加：数量
+      shootingSelected, // 撮影編集代行
+      satueiSelected,   // 撮影代行
+      henshuSelected,   // 編集代行
+      fullSelected,     // フルセット
       setupQty = 0,
       shootingQty = 0,
       satueiQty = 0,
       henshuQty = 0,
+      fullQty = 0,
     } = await req.json();
 
     if (!to || !name) {
-      return NextResponse.json({ error: "Bad request" }, { status: 400 });
+      return NextResponse.json({ error: "to/name missing" }, { status: 400 });
     }
 
+    // 価格（送信側と整合）
     const setupPrice = 30000;
     const shootingPrice = 50000;
     const satueiPrice = 35000;
     const henshuPrice = 15000;
+    const fullPrice = 80000;
 
-    // items 配列に正規化（数量>0のもののみ採用）
+    // PDF用アイテム（数量>0 のみ採用）
     const items = [
       setupSelected && setupQty > 0
-        ? { label: "初期セットアップ", unitPrice: setupPrice, qty: Number(setupQty) }
+        ? { label: "初期設定", unitPrice: setupPrice, qty: Number(setupQty) }
         : null,
       shootingSelected && shootingQty > 0
         ? { label: "撮影編集代行", unitPrice: shootingPrice, qty: Number(shootingQty) }
@@ -61,6 +63,9 @@ export async function POST(req: NextRequest) {
         : null,
       henshuSelected && henshuQty > 0
         ? { label: "編集代行", unitPrice: henshuPrice, qty: Number(henshuQty) }
+        : null,
+      fullSelected && fullQty > 0
+        ? { label: "フルセット", unitPrice: fullPrice, qty: Number(fullQty) }
         : null,
     ].filter(Boolean) as { label: string; unitPrice: number; qty: number }[];
 
@@ -74,7 +79,7 @@ export async function POST(req: NextRequest) {
       dueDate ??
       new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString("ja-JP");
 
-    // PDF生成（新形式）
+    // PDF生成
     const pdfBytes = await createInvoicePdf({
       customerName: name,
       invoiceNumber: INVOICE_ID,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { addDoc, collection } from "firebase/firestore";
@@ -8,20 +8,23 @@ import { db } from "@/lib/firebase";
 import { useAtomValue } from "jotai";
 import { invEmailAtom, invOwnerNameAtom } from "@/lib/atoms/openFlagAtom";
 
+type ProductKey = "setup" | "shooting" | "satuei" | "henshu" | "full";
+
 export default function SendTransferPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
 
-  const [setupSelected, setSetupSelected] = useState(false);
-  const [shootingSelected, setShootingSelected] = useState(false);
-  const [satueiSelected, setSatueiSelected] = useState(false);
-  const [henshuSelected, setHenshuSelected] = useState(false);
+  // 「どれか一つだけ」選択
+  const [selected, setSelected] = useState<ProductKey | null>(null);
 
-  // 数量
-  const [setupQty, setSetupQty] = useState<number>(0);
-  const [shootingQty, setShootingQty] = useState<number>(0);
-  const [satueiQty, setSatueiQty] = useState<number>(0);
-  const [henshuQty, setHenshuQty] = useState<number>(0);
+  // 数量（各商品ごとに保持。選択中のものだけ使う）
+  const [qty, setQty] = useState<Record<ProductKey, number>>({
+    setup: 0,
+    shooting: 0,
+    satuei: 0,
+    henshu: 0,
+    full: 0,
+  });
 
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
@@ -30,22 +33,36 @@ export default function SendTransferPage() {
   const invEmail = useAtomValue(invEmailAtom);
   const invOwnerName = useAtomValue(invOwnerNameAtom);
 
-  const setupPrice = 30000;
-  const shootingPrice = 50000;
-  const satueiPrice = 35000;
-  const henshuPrice = 15000;
+  // 価格
+  const PRICES: Record<ProductKey, number> = {
+    setup: 30000,   // 初期設定
+    shooting: 50000, // 撮影編集代行
+    satuei: 35000,  // 撮影代行
+    henshu: 15000,  // 編集代行
+    full: 80000,    // フルセット（必要に応じて調整OK）
+  };
 
-  const setupSub = setupSelected ? setupPrice * setupQty : 0;
-  const shootingSub = shootingSelected ? shootingPrice * shootingQty : 0;
-  const satueiSub = satueiSelected ? satueiPrice * satueiQty : 0;
-  const henshuSub = henshuSelected ? henshuPrice * henshuQty : 0;
+  // 表示名
+  const LABELS: Record<ProductKey, string> = {
+    setup: "初期設定",
+    shooting: "撮影編集代行",
+    satuei: "撮影代行",
+    henshu: "編集代行",
+    full: "フルセット",
+  };
 
-  const amount = setupSub + shootingSub + satueiSub + henshuSub;
-  const tax = Math.round(amount * 0.1);
-  const total = amount + tax;
+  // Stripe Payment Links
+  const LINKS: Record<ProductKey, string> = {
+    setup: "https://buy.stripe.com/28EcN6flK0p19V52jaefC02",
+    henshu: "https://buy.stripe.com/9B6bJ28Xm0p1gjt0b2efC03",
+    satuei: "https://buy.stripe.com/00w5kEehG9ZB7MX5vmefC04",
+    shooting: "https://buy.stripe.com/6oUcN60qQ4Fh8R14riefC06",
+    full: "https://buy.stripe.com/cNi7sMflKgnZ7MXe1SefC07",
+  };
 
   const REFERRAL_URL = "https://www.pageit.shop/referral";
 
+  // 初期値（自動入力）
   useEffect(() => {
     if (invOwnerName) setName((prev) => (prev ? prev : invOwnerName));
   }, [invOwnerName]);
@@ -66,79 +83,75 @@ export default function SendTransferPage() {
 
   const isValidEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 
-  const anyQty =
-    (setupSelected ? setupQty : 0) +
-    (shootingSelected ? shootingQty : 0) +
-    (satueiSelected ? satueiQty : 0) +
-    (henshuSelected ? henshuQty : 0);
-
   const clampQty = (v: number) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
 
-  // ボタン色：ライト/ダーク両対応
-  const baseBtn =
-    "w-full justify-start transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-400";
-  const off =
-    "bg-blue-300 hover:bg-blue-500 active:bg-blue-800 text-black " +
-    "dark:bg-blue-900/40 dark:hover:bg-blue-900 dark:active:bg-blue-950 dark:text-white";
-  const on =
-    "bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white " +
-    "dark:bg-blue-600 dark:hover:bg-blue-500 dark:active:bg-blue-700";
+  // 金額計算（選択中のみ）
+  const { subTotal, tax, total } = useMemo(() => {
+    if (!selected) return { subTotal: 0, tax: 0, total: 0 };
+    const subtotal = PRICES[selected] * (qty[selected] || 0);
+    const t = Math.round(subtotal * 0.1);
+    return { subTotal: subtotal, tax: t, total: subtotal + t };
+  }, [selected, qty, PRICES]);
 
-  // 横並びの1行（ボタン＋数量）
-  const ItemRow = ({
-    label,
-    price,
-    selected,
-    setSelected,
-    qty,
-    setQty,
-  }: {
-    label: string;
-    price: number;
-    selected: boolean;
-    setSelected: (v: boolean) => void;
-    qty: number;
-    setQty: (v: number) => void;
-  }) => (
-    <div className="flex items-center gap-3">
-      <Button
-        className={`${baseBtn} ${selected ? on : off} flex-1 h-10`}
-        onClick={() => {
-          const next = !selected;
-          setSelected(next);
-          if (next && qty === 0) setQty(1);
-          if (!next) setQty(0);
-        }}
-      >
-        {label}（{price.toLocaleString()}円）
-      </Button>
+  // 1行（ラジオ挙動）
+  const ItemRow = ({ keyName }: { keyName: ProductKey }) => {
+    const active = selected === keyName;
+    const label = LABELS[keyName];
+    const price = PRICES[keyName];
 
-      <div className="flex items-center gap-2 shrink-0">
-        <span className="text-sm text-gray-700 dark:text-gray-300">数量</span>
-        <Input
-          type="number"
-          inputMode="numeric"
-          min={1}
-          step={1}
-          disabled={!selected}
-          value={selected ? qty : ""}
-          placeholder={selected ? "1" : "-"}
-          onChange={(e) => setQty(clampQty(Number(e.target.value)))}
-          className="w-20 h-10"
-        />
+    return (
+      <div className="flex items-center gap-3">
+        <Button
+          className={`${"w-full justify-start transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-400"} ${
+            active
+              ? "bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white dark:bg-blue-600 dark:hover:bg-blue-500 dark:active:bg-blue-700"
+              : "bg-blue-300 hover:bg-blue-500 active:bg-blue-800 text-black dark:bg-blue-900/40 dark:hover:bg-blue-900 dark:active:bg-blue-950 dark:text-white"
+          } flex-1 h-10`}
+          onClick={() => {
+            // 同じボタンをもう一度押したら解除、それ以外は切り替え
+            setSelected((prev) => (prev === keyName ? null : keyName));
+            setQty((prev) => {
+              const next = { ...prev };
+              if (selected !== keyName && prev[keyName] === 0) next[keyName] = 1; // 選択時に数量1を初期セット
+              return next;
+            });
+          }}
+        >
+          {label}（{price.toLocaleString()}円）
+        </Button>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-sm text-gray-700 dark:text-gray-300">数量</span>
+          <Input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            step={1}
+            disabled={!active}
+            value={active ? qty[keyName] || "" : ""}
+            placeholder={active ? "1" : "-"}
+            onChange={(e) =>
+              setQty((prev) => ({ ...prev, [keyName]: clampQty(Number(e.target.value)) }))
+            }
+            className="w-20 h-10"
+          />
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const handleSend = async () => {
     const trimmedName = name.trim();
     const trimmedEmail = email.trim();
 
-    if (!trimmedName || !trimmedEmail || anyQty <= 0) {
+    const selectedQty = selected ? qty[selected] || 0 : 0;
+
+    if (!trimmedName || !trimmedEmail || !selected || selectedQty <= 0) {
       const missing: string[] = [];
       if (!trimmedName) missing.push("お名前");
       if (!trimmedEmail) missing.push("メールアドレス");
-      if (anyQty <= 0) missing.push("数量");
+      if (!selected) missing.push("商品選択");
+      if (selected && selectedQty <= 0) missing.push("数量");
       alert(`${missing.join("・")}が未入力です。ご入力・ご選択ください。`);
       return;
     }
@@ -147,35 +160,42 @@ export default function SendTransferPage() {
       return;
     }
 
-    // 送信メール本文（紹介制度＆URLを末尾に追記）
+    // メール本文（受け取り側へ数量注意を含める）
+    const label = LABELS[selected];
+    const unitPrice = PRICES[selected];
+    const link = LINKS[selected];
+
+    const payLine =
+      `・${label}：${link}` +
+      (selectedQty > 1 ? `（※数量を ${selectedQty} に変更してお支払いください）` : "");
+
     const body = joinTight([
       `${trimmedName}様`,
       "",
       "この度はPageitにお申し込みいただき、誠にありがとうございます。",
       "",
-      "以下の内容で初回セットアップ費用のご案内を申し上げます。",
+      "以下の内容でご請求のご案内を申し上げます。",
       "",
       "【ご請求内訳】",
-      setupSelected && setupQty > 0 &&
-        `初期セットアップ：${setupPrice.toLocaleString()}円 × ${setupQty} ＝ ${setupSub.toLocaleString()}円`,
-      shootingSelected && shootingQty > 0 &&
-        `撮影編集代行　　：${shootingPrice.toLocaleString()}円 × ${shootingQty} ＝ ${shootingSub.toLocaleString()}円`,
-      satueiSelected && satueiQty > 0 &&
-        `撮影代行　　　　：${satueiPrice.toLocaleString()}円 × ${satueiQty} ＝ ${satueiSub.toLocaleString()}円`,
-      henshuSelected && henshuQty > 0 &&
-        `編集代行　　　　：${henshuPrice.toLocaleString()}円 × ${henshuQty} ＝ ${henshuSub.toLocaleString()}円`,
+      `${label}：${unitPrice.toLocaleString()}円 × ${selectedQty} ＝ ${(unitPrice * selectedQty).toLocaleString()}円`,
       "",
       "【ご請求金額】",
-      `税抜小計　　　：${amount.toLocaleString()}円`,
-      `消費税　　　　：${tax.toLocaleString()}円`,
-      `税込合計　　　：${total.toLocaleString()}円`,
+      `税抜小計：${subTotal.toLocaleString()}円`,
+      `消費税　：${tax.toLocaleString()}円`,
+      `税込合計：${total.toLocaleString()}円`,
       "",
-      "【振込先情報】",
-      "銀行名：三菱東京UFJ銀行",
-      "支店名：新大阪支店",
-      "口座種別：普通",
-      "口座番号：5002177",
-      "口座名義：サイトウ　ツヨシ",
+      "【お支払い方法】",
+      "1) 銀行振込",
+      "　銀行名：三菱東京UFJ銀行",
+      "　支店名：新大阪支店",
+      "　口座種別：普通",
+      "　口座番号：5002177",
+      "　口座名義：サイトウ　ツヨシ",
+      "",
+      "2) クレジットカード決済（Stripe）",
+      "　下記リンクより該当商品をご選択のうえ、お手続きください。",
+      "　※Stripeの数量は本メールと連動しません。数量が2以上の場合は、決済ページ内の数量を上記の数量に変更してからお支払いください。",
+      payLine,
       "",
       "---",
       "ご不明な点などございましたら、お気軽にご返信ください。",
@@ -194,44 +214,40 @@ export default function SendTransferPage() {
     try {
       setSending(true);
 
+      // 既存APIに「選択したものだけ true」で渡す
       await fetch("/api/send-email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           to: trimmedEmail,
-          subject: "【Pageit】振込のご案内",
+          subject: "【Pageit】請求書（銀行振込／カード決済のご案内）",
           body,
           name: trimmedName,
-          setupSelected,
-          shootingSelected,
-          satueiSelected,
-          henshuSelected,
-          setupQty,
-          shootingQty,
-          satueiQty,
-          henshuQty,
+
+          // 各フラグ（選択したものだけ true）
+          setupSelected: selected === "setup",
+          shootingSelected: selected === "shooting",
+          satueiSelected: selected === "satuei",
+          henshuSelected: selected === "henshu",
+          fullSelected: selected === "full",
+
+          // 数量（選択したものだけ数値、他は0）
+          setupQty: selected === "setup" ? selectedQty : 0,
+          shootingQty: selected === "shooting" ? selectedQty : 0,
+          satueiQty: selected === "satuei" ? selectedQty : 0,
+          henshuQty: selected === "henshu" ? selectedQty : 0,
+          fullQty: selected === "full" ? selectedQty : 0,
         }),
       });
 
+      // Firestore ログ
       await addDoc(collection(db, "transferLogs"), {
         name: trimmedName,
         email: trimmedEmail,
-        setupSelected,
-        shootingSelected,
-        satueiSelected,
-        henshuSelected,
-        setupPrice: setupSelected ? setupPrice : 0,
-        shootingPrice: shootingSelected ? shootingPrice : 0,
-        satueiPrice: satueiSelected ? satueiPrice : 0,
-        henshuPrice: henshuSelected ? henshuPrice : 0,
-        setupQty,
-        shootingQty,
-        satueiQty,
-        henshuQty,
-        setupSub,
-        shootingSub,
-        satueiSub,
-        henshuSub,
+        selected,
+        qty: selectedQty,
+        price: unitPrice,
+        subTotal,
         tax,
         total,
         timestamp: new Date(),
@@ -249,7 +265,7 @@ export default function SendTransferPage() {
   return (
     <main className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-neutral-950 p-4">
       <div className="w-full max-w-lg p-4 space-y-4 rounded-2xl shadow bg-white dark:bg-neutral-900 border border-gray-200 dark:border-neutral-800">
-        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">振込案内の送信</h1>
+        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">請求メールの送信</h1>
 
         <Input
           placeholder="お客様の名前"
@@ -263,50 +279,21 @@ export default function SendTransferPage() {
         />
 
         <div className="flex flex-col gap-3">
-          <ItemRow
-            label="初期セットアップ"
-            price={setupPrice}
-            selected={setupSelected}
-            setSelected={setSetupSelected}
-            qty={setupQty}
-            setQty={setSetupQty}
-          />
-        <ItemRow
-            label="撮影編集代行"
-            price={shootingPrice}
-            selected={shootingSelected}
-            setSelected={setShootingSelected}
-            qty={shootingQty}
-            setQty={setShootingQty}
-          />
-          <ItemRow
-            label="撮影代行"
-            price={satueiPrice}
-            selected={satueiSelected}
-            setSelected={setSatueiSelected}
-            qty={satueiQty}
-            setQty={setSatueiQty}
-          />
-          <ItemRow
-            label="編集代行"
-            price={henshuPrice}
-            selected={henshuSelected}
-            setSelected={setHenshuSelected}
-            qty={henshuQty}
-            setQty={setHenshuQty}
-          />
+          <ItemRow keyName="setup" />
+          <ItemRow keyName="shooting" />
+          <ItemRow keyName="satuei" />
+          <ItemRow keyName="henshu" />
+          <ItemRow keyName="full" />
         </div>
 
         <div className="text-sm text-gray-700 dark:text-gray-300 space-y-1">
-          <p>税抜小計　：{amount.toLocaleString()}円</p>
+          <p>税抜小計　：{subTotal.toLocaleString()}円</p>
           <p>消費税　　：{tax.toLocaleString()}円</p>
           <p className="font-semibold">税込合計　：{total.toLocaleString()}円</p>
         </div>
 
-       
-
         <Button onClick={handleSend} disabled={sending || sent}>
-          {sending ? "送信中..." : sent ? "送信済み" : "振込案内を送信"}
+          {sending ? "送信中..." : sent ? "送信済み" : "請求メールを送信"}
         </Button>
 
         {message && <p className="text-gray-700 dark:text-gray-300">{message}</p>}

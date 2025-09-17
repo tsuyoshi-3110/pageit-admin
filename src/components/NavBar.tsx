@@ -50,13 +50,13 @@ export default function NavBar() {
       </nav>
 
       {/* オーバーレイ */}
-     {menuOpen && (
-  <div
-    className="fixed inset-0 right-64 z-[55] bg-white/30 backdrop-blur-sm backdrop-saturate-150 transition-opacity"
-    onClick={toggleMenu}
-    aria-hidden
-  />
-)}
+      {menuOpen && (
+        <div
+          className="fixed inset-0 right-64 z-[55] bg-white/30 backdrop-blur-sm backdrop-saturate-150 transition-opacity"
+          onClick={toggleMenu}
+          aria-hidden
+        />
+      )}
 
       {/* ドロワーメニュー */}
       <div
@@ -74,13 +74,7 @@ export default function NavBar() {
         <div className="flex flex-col px-4 py-2 space-y-3">
           {openFlag && (
             <>
-              <Link
-                href="/login"
-                onClick={toggleMenu}
-                className="text-gray-700 hover:text-blue-500"
-              >
-                ログイン
-              </Link>
+
               {user && (
                 <>
                   <Link
@@ -105,14 +99,43 @@ export default function NavBar() {
                     請求メール
                   </Link>
                   <Link
+                    href="/transfer-logs"
+                    onClick={toggleMenu}
+                    className="text-gray-700 hover:text-blue-500"
+                  >
+                    請求メール送信一覧
+                  </Link>
+                  <Link
                     href="/send-credentials"
                     onClick={toggleMenu}
                     className="text-gray-700 hover:text-blue-500"
                   >
                     アカウントメール
                   </Link>
+                  <Link
+                    href="/postList"
+                    onClick={toggleMenu}
+                    className="text-gray-700 hover:text-blue-500"
+                  >
+                    タイムライン
+                  </Link>
+                  <Link
+                    href="/community"
+                    onClick={toggleMenu}
+                    className="text-gray-700 hover:text-blue-500"
+                  >
+                    コミュニティ
+                  </Link>
                 </>
               )}
+
+               <Link
+                href="/login"
+                onClick={toggleMenu}
+                className="text-gray-700 hover:text-blue-500"
+              >
+                ログイン
+              </Link>
             </>
           )}
         </div>

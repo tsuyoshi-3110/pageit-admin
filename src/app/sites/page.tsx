@@ -819,40 +819,51 @@ export default function SiteListPage() {
                   </div>
 
                   {/* 詳細 */}
+                  {/* 詳細 */}
                   <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 mt-2 text-sm">
                     <div className="flex items-center gap-2">
-                      <User className="h-4 w-4 text-gray-500" />
-                      <dt className="text-gray-500">オーナー</dt>
-                      <dd className="ml-auto sm:ml-2 font-medium">
+                      <User className="h-4 w-4 text-gray-500 dark:text-gray-400" />
+                      <dt className="text-gray-600 dark:text-gray-300">
+                        オーナー
+                      </dt>
+                      <dd className="ml-auto sm:ml-2 font-medium text-gray-900 dark:text-gray-100">
                         {site.ownerName || "-"}
                       </dd>
                     </div>
+
                     <div className="flex items-center gap-2">
-                      <Phone className="h-4 w-4 text-gray-500" />
-                      <dt className="text-gray-500">電話番号</dt>
-                      <dd className="ml-auto sm:ml-2 font-medium">
+                      <Phone className="h-4 w-4 text-gray-500 dark:text-gray-400" />
+                      <dt className="text-gray-600 dark:text-gray-300">
+                        電話番号
+                      </dt>
+                      <dd className="ml-auto sm:ml-2 font-medium text-gray-900 dark:text-gray-100">
                         {site.ownerPhone || "-"}
                       </dd>
                     </div>
+
                     <div className="flex items-center gap-2 sm:col-span-2">
-                      <MapPin className="h-4 w-4 text-gray-500" />
-                      <dt className="text-gray-500">住所</dt>
-                      <dd className="ml-auto sm:ml-2 font-medium truncate">
+                      <MapPin className="h-4 w-4 text-gray-500 dark:text-gray-400" />
+                      <dt className="text-gray-600 dark:text-gray-300">住所</dt>
+                      <dd className="ml-auto sm:ml-2 font-medium text-gray-900 dark:text-gray-100 truncate">
                         {site.ownerAddress || "-"}
                       </dd>
                     </div>
+
                     <div className="flex items-center gap-2 sm:col-span-2">
-                      <AtSign className="h-4 w-4 text-gray-500" />
-                      <dt className="text-gray-500">メール</dt>
-                      <dd className="ml-auto sm:ml-2 font-medium truncate">
+                      <AtSign className="h-4 w-4 text-gray-500 dark:text-gray-400" />
+                      <dt className="text-gray-600 dark:text-gray-300">
+                        メール
+                      </dt>
+                      <dd className="ml-auto sm:ml-2 font-medium text-gray-900 dark:text-gray-100 truncate">
                         {site.ownerEmail || "-"}
                       </dd>
                     </div>
+
                     {/* 業種表示 */}
                     <div className="flex items-center gap-2 sm:col-span-2">
-                      <Briefcase className="h-4 w-4 text-gray-500" />
-                      <dt className="text-gray-500">業種</dt>
-                      <dd className="ml-auto sm:ml-2 font-medium truncate">
+                      <Briefcase className="h-4 w-4 text-gray-500 dark:text-gray-400" />
+                      <dt className="text-gray-600 dark:text-gray-300">業種</dt>
+                      <dd className="ml-auto sm:ml-2 font-medium text-gray-900 dark:text-gray-100 truncate">
                         {industryDisplay}
                       </dd>
                     </div>

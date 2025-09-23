@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 
 // ---- Stripe ----
 const stripeWH = new Stripe(process.env.STRIPE_SECRET_KEY!);
-const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET!;
+const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET2!;
 
 // ---- siteKey の最終決定ロジック（クライアント atom は使わない）----
 // 1) Checkout metadata.siteKey

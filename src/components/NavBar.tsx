@@ -2,9 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { onAuthStateChanged } from "firebase/auth";
+import { onAuthStateChanged, User } from "firebase/auth";
 import { auth } from "@/lib/firebase";
-import { User } from "firebase/auth";
 import { useAtom } from "jotai";
 import { openFlagAtom } from "@/lib/atoms/openFlagAtom";
 import { Menu, X } from "lucide-react";
@@ -41,7 +40,7 @@ export default function NavBar() {
 
         {/* ハンバーガーアイコン（モバイル） */}
         <button
-          className=" text-gray-700"
+          className="text-gray-700"
           onClick={toggleMenu}
           aria-label="メニューを開く"
         >
@@ -74,7 +73,6 @@ export default function NavBar() {
         <div className="flex flex-col px-4 py-2 space-y-3">
           {openFlag && (
             <>
-
               {user && (
                 <>
                   <Link
@@ -90,6 +88,13 @@ export default function NavBar() {
                     className="text-gray-700 hover:text-blue-500"
                   >
                     サイト一覧
+                  </Link>
+                  <Link
+                    href="/orders"
+                    onClick={toggleMenu}
+                    className="text-gray-700 hover:text-blue-500"
+                  >
+                    販売履歴
                   </Link>
                   <Link
                     href="/send-transfer"
@@ -129,7 +134,7 @@ export default function NavBar() {
                 </>
               )}
 
-               <Link
+              <Link
                 href="/login"
                 onClick={toggleMenu}
                 className="text-gray-700 hover:text-blue-500"

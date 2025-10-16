@@ -8,6 +8,8 @@ export const metadata = {
   description: "サイトオーナーアカウント作成用ポータル",
 };
 
+//更新
+
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="ja">

@@ -1,72 +1,69 @@
-// src/app/api/stripe/webhook/route.ts
-import { NextRequest, NextResponse } from "next/server";
+// app/api/stripe/webhook/route.ts（管理ウェブ側）
+import { stripe } from "@/lib/stripe"; // STRIPE_SECRET_KEY に基づいた初期化
+import { adminDb } from "@/lib/firebase-admin"; // Firebase Admin SDK 初期化済みと想定
+import { headers } from "next/headers";
+import { NextRequest } from "next/server";
+import Stripe from "stripe";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-import { stripeConnect } from "@/lib/stripe-connect";
-import { getApps, initializeApp, cert } from "firebase-admin/app";
-import { getFirestore, Timestamp } from "firebase-admin/firestore";
-
-function db() {
-  if (getApps().length === 0) {
-    const projectId = process.env.FIREBASE_PROJECT_ID!;
-    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL!;
-    let privateKey = process.env.FIREBASE_PRIVATE_KEY || "";
-    if (privateKey.startsWith('"') && privateKey.endsWith('"')) privateKey = privateKey.slice(1, -1);
-    privateKey = privateKey.replace(/\\n/g, "\n");
-    initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
-  }
-  return getFirestore();
-}
-
 export async function POST(req: NextRequest) {
-  const sig = req.headers.get("stripe-signature") || "";
-  const whSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!whSecret) return NextResponse.json({ error: "STRIPE_WEBHOOK_SECRET missing" }, { status: 500 });
+  const rawBody = await req.arrayBuffer();
+  const sig = (await headers()).get("stripe-signature");
 
-  const buf = await req.arrayBuffer();
+  if (!sig) {
+    return new Response("Missing stripe-signature header", { status: 400 });
+  }
+
   let event;
-
   try {
-    event = stripeConnect.webhooks.constructEvent(Buffer.from(buf), sig, whSecret);
+    event = stripe.webhooks.constructEvent(
+      Buffer.from(rawBody),
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET!
+    );
   } catch (err: any) {
     console.error("Webhook signature verification failed:", err.message);
-    return new NextResponse(`Webhook Error: ${err.message}`, { status: 400 });
+    return new Response(`Webhook Error: ${err.message}`, { status: 400 });
   }
 
-  // 成功時ハンドリング
   if (event.type === "checkout.session.completed") {
-    const session = event.data.object as any;
+    const session = event.data.object as Stripe.Checkout.Session;
 
-    // metadata から参照
-    const sellerDocId = session.metadata?.sellerDocId ?? null;
-    const siteKey = session.metadata?.siteKey ?? null;
+    try {
+      const {
+        id,
+        amount_total,
+        currency,
+        payment_status,
+        customer_details,
+        metadata,
+      } = session;
 
-    const d = db();
-    // 既存プレオーダーを確定更新（無ければ新規）
-    const q = await d.collection("siteOrders").where("checkoutSessionId", "==", session.id).limit(1).get();
-    const order = {
-      status: "paid",
-      amount_total: session.amount_total ?? null,
-      currency: session.currency ?? "jpy",
-      customer_email: session.customer_details?.email ?? null,
-      payment_intent: session.payment_intent ?? null,
-      sellerDocId,
-      siteKey,
-      updatedAt: Timestamp.now(),
-    };
+      const items = metadata?.items ? JSON.parse(metadata.items) : [];
 
-    if (!q.empty) {
-      await q.docs[0].ref.set(order, { merge: true });
-    } else {
-      await d.collection("siteOrders").add({
-        ...order,
-        createdAt: Timestamp.now(),
-        checkoutSessionId: session.id,
-        items: [], // 必要なら line items API で再取得して保存
+      await adminDb.collection("siteOrders").add({
+        siteKey: metadata?.siteKey || null,
+        createdAt: new Date(),
+        stripeCheckoutSessionId: id,
+        amount: amount_total,
+        currency,
+        payment_status,
+        customer: {
+          email: customer_details?.email ?? null,
+          name: customer_details?.name ?? null,
+          address: customer_details?.address ?? null,
+        },
+        items,
       });
+
+      return new Response("Order saved", { status: 200 });
+    } catch (err) {
+      console.error("Error saving order:", err);
+      return new Response("Failed to save order", { status: 500 });
     }
   }
 
-  return NextResponse.json({ received: true });
+  return new Response("Unhandled event type", { status: 200 });
 }

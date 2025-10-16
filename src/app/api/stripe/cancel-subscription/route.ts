@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
     const snap = await adminDb.doc(`siteSettings/${siteKey}`).get();
     const data = snap.data() ?? {};
     const customerId = data.stripeCustomerId as string | undefined;
-    const isFreePlan = data.isFreePlan !== false; 
+    const isFreePlan = data.isFreePlan !== false;
 
     /* ── 無料プラン → 何もしないで成功 ── */
     if (isFreePlan || !customerId) {

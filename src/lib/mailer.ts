@@ -6,11 +6,10 @@ const {
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET,
   GOOGLE_REFRESH_TOKEN,
-  GOOGLE_SENDER_EMAIL,       // ← ここを使う
-  GOOGLE_REDIRECT_URI,       // OAuth Playground の URI
+  GOOGLE_SENDER_EMAIL,
+  GOOGLE_REDIRECT_URI,
 } = process.env;
 
-// 起動時に不足していないかチェック
 (() => {
   const missing: string[] = [];
   if (!GOOGLE_CLIENT_ID) missing.push("GOOGLE_CLIENT_ID");
@@ -22,7 +21,6 @@ const {
   }
 })();
 
-// OAuth2 クライアント
 const oAuth2Client = new google.auth.OAuth2(
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET,
@@ -46,20 +44,27 @@ function buildFromAddress(): string {
 }
 
 export async function sendMail({ to, subject, html, bcc, replyTo }: Mail) {
-  // アクセストークン取得
+  // ここから詳細ログ
+  console.log("[mailer] prepare send", {
+    to,
+    subject,
+    from: GOOGLE_SENDER_EMAIL,
+    clientIdTail: GOOGLE_CLIENT_ID?.slice(0, 8),
+    redirect: GOOGLE_REDIRECT_URI,
+  });
+
   let accessToken: string | null = null;
   try {
     const r = await oAuth2Client.getAccessToken();
     accessToken = r?.token ?? null;
-  } catch (e) {
-    console.error("[mailer] getAccessToken failed:", e);
+  } catch (e: any) {
+    console.error("[mailer] getAccessToken failed:", e?.response?.data || e?.message || e);
     throw new Error("[mailer] Failed to acquire Google OAuth2 access token");
   }
   if (!accessToken) {
     throw new Error("[mailer] Empty access token from Google OAuth2");
   }
 
-  // Nodemailer トランスポート
   const transporter = nodemailer.createTransport({
     host: "smtp.gmail.com",
     port: 465,
@@ -76,16 +81,38 @@ export async function sendMail({ to, subject, html, bcc, replyTo }: Mail) {
     connectionTimeout: 10_000,
     greetingTimeout: 10_000,
     socketTimeout: 20_000,
+    // ★ 追加：詳細デバッグを Vercel Runtime Logs に出す
+    logger: true,
+    debug: true,
   } as nodemailer.TransportOptions);
 
-  // 送信
   const from = buildFromAddress();
-  await transporter.sendMail({
-    from,
-    to,
-    bcc,
-    subject,
-    html,
-    replyTo,
-  });
+
+  try {
+    const info = await transporter.sendMail({
+      from,
+      to,
+      bcc,
+      subject,
+      html,
+      replyTo,
+    });
+    console.log("[mailer] sent ok:", {
+      messageId: info?.messageId,
+      accepted: info?.accepted,
+      rejected: info?.rejected,
+      response: info?.response,
+    });
+    return info;
+  } catch (err: any) {
+    console.error("[mailer] sendMail error:", {
+      code: err?.code,
+      command: err?.command,
+      response: err?.response,
+      responseCode: err?.responseCode,
+      message: err?.message,
+      stack: err?.stack?.split("\n").slice(0, 3).join(" | "),
+    });
+    throw err;
+  }
 }

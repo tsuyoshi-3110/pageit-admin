@@ -1,18 +1,19 @@
+// src/app/api/stripe/webhook/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { adminDb } from "@/lib/firebase-admin";
 import { stripe } from "@/lib/stripe";
 import { sendMail } from "@/lib/mailer";
 
-export const config = {
-  api: { bodyParser: false },
-};
+// === Next.js App Router 用 ===
+export const runtime = "nodejs";
 
+// === Stripe 設定 ===
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET!;
 const vercelToken = process.env.VERCEL_TOKEN!;
 
 // ================================
-// 🔧 型補助（Stripe SDK にない shipping_details 用）
+// 🔧 型補助（Stripe SDKに含まれない shipping_details 用）
 // ================================
 type ShippingDetails = {
   address?: {
@@ -31,14 +32,13 @@ type ShippingDetails = {
 // 🔧 通貨ヘルパー
 // ================================
 const ZERO_DECIMAL = new Set([
-  "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga", "pyg", "rwf",
-  "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
+  "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga",
+  "pyg", "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
 ]);
-
 const toMajor = (amount: number | null | undefined, currency?: string | null) => {
   const a = amount ?? 0;
-  const c = currency ?? "jpy";
-  return ZERO_DECIMAL.has(c.toLowerCase()) ? a : a / 100;
+  const c = (currency ?? "jpy").toLowerCase();
+  return ZERO_DECIMAL.has(c) ? a : a / 100;
 };
 
 // ================================
@@ -50,8 +50,7 @@ async function getSiteKeyByCustomerId(customerId: string): Promise<string | null
     .where("stripeCustomerId", "==", customerId)
     .limit(1)
     .get();
-  if (!snap.empty) return snap.docs[0].id;
-  return null;
+  return !snap.empty ? snap.docs[0].id : null;
 }
 
 async function getOwnerEmailBySiteKey(siteKey: string): Promise<string | null> {
@@ -61,26 +60,30 @@ async function getOwnerEmailBySiteKey(siteKey: string): Promise<string | null> {
 }
 
 // ================================
-// 🔧 Vercelプロジェクト削除
+// 🔧 Vercel プロジェクト削除
 // ================================
 async function deleteVercelProject(siteKey: string) {
-  const res = await fetch(`https://api.vercel.com/v9/projects/${siteKey}`, {
-    method: "DELETE",
-    headers: {
-      Authorization: `Bearer ${vercelToken}`,
-      "Content-Type": "application/json",
-    },
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    console.error("Vercel project deletion failed:", err);
-  } else {
-    console.log(`✅ Deleted Vercel project "${siteKey}"`);
+  try {
+    const res = await fetch(`https://api.vercel.com/v9/projects/${siteKey}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${vercelToken}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error("Vercel project deletion failed:", err);
+    } else {
+      console.log(`✅ Deleted Vercel project "${siteKey}"`);
+    }
+  } catch (err) {
+    console.error("deleteVercelProject error:", err);
   }
 }
 
 // ================================
-// 🧾 注文メールHTML生成
+// 🔧 注文メールHTML生成
 // ================================
 function buildOrderHtml(
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
@@ -109,10 +112,8 @@ function buildOrderHtml(
 
   const rows = lineItems.data
     .map((li) => {
-      const pname =
-        (li.price?.product as Stripe.Product | undefined)?.name ||
-        li.description ||
-        "商品";
+      const product = li.price?.product as Stripe.Product | undefined;
+      const pname = product?.name || li.description || "商品";
       const qty = li.quantity || 1;
       const subtotal = toMajor(li.amount_subtotal ?? 0, session.currency);
       const unit = subtotal / qty;
@@ -149,9 +150,9 @@ function buildOrderHtml(
       <tbody>${rows}</tbody>
     </table>
 
-    <p style="margin-top:12px;font-size:16px;">合計金額: <b>¥${Math.round(
-      total
-    ).toLocaleString()}</b> (${currency})</p>
+    <p style="margin-top:12px;font-size:16px;">
+      合計金額: <b>¥${Math.round(total).toLocaleString()}</b> (${currency})
+    </p>
 
     <h3>お届け先</h3>
     <p>
@@ -161,7 +162,9 @@ function buildOrderHtml(
     </p>
 
     <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
-    <p style="color:#666;font-size:12px;">このメールは Stripe Webhook により自動送信されています。</p>
+    <p style="color:#666;font-size:12px;">
+      このメールは Stripe Webhook により自動送信されています。
+    </p>
   </div>`;
 }
 
@@ -177,27 +180,36 @@ export async function POST(req: NextRequest) {
   try {
     event = stripe.webhooks.constructEvent(rawBody, sig, endpointSecret);
   } catch (err) {
-    console.error("Invalid signature:", err);
+    console.error("❌ Invalid Stripe signature:", err);
     return new NextResponse("Webhook Error", { status: 400 });
   }
 
   try {
     switch (event.type) {
+      // ============================
+      // ✅ 支払い完了イベント
+      // ============================
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session & {
           metadata?: { siteKey?: string };
           shipping_details?: ShippingDetails;
         };
+
+        // --- siteKey 判定 ---
         const siteKey =
           session.metadata?.siteKey ||
           (session.customer
             ? await getSiteKeyByCustomerId(session.customer as string)
             : null);
+
+        console.log("🔎 Resolved siteKey:", siteKey);
+
         if (!siteKey) {
-          console.warn("No siteKey found");
+          console.warn("⚠️ No siteKey found for session:", session.id);
           break;
         }
 
+        // --- Firestore 更新 ---
         await adminDb.doc(`siteSettings/${siteKey}`).set(
           {
             stripeCustomerId: session.customer ?? undefined,
@@ -206,56 +218,85 @@ export async function POST(req: NextRequest) {
           { merge: true }
         );
 
+        // --- 商品リスト取得 ---
         const lineItems = await stripe.checkout.sessions.listLineItems(session.id, {
           expand: ["data.price.product"],
         });
 
+        // --- メール送信 ---
         const ownerEmail = await getOwnerEmailBySiteKey(siteKey);
         if (ownerEmail) {
           const html = buildOrderHtml(session, lineItems);
-          await sendMail({
-            to: ownerEmail,
-            subject: "【注文通知】新しい注文が完了しました",
-            html,
-          });
-          console.log("📧 Sent order email to", ownerEmail);
+          try {
+            await sendMail({
+              to: ownerEmail,
+              subject: "【注文通知】新しい注文が完了しました",
+              html,
+            });
+            console.log("📧 Sent order email to:", ownerEmail);
+          } catch (mailErr) {
+            console.error("📨 Mail send failed:", mailErr);
+          }
+        } else {
+          console.warn(`⚠️ ownerEmail not found in siteSettings/${siteKey}`);
+        }
+
+        break;
+      }
+
+      // ============================
+      // 🟢 支払い成功（定期）
+      // ============================
+      case "invoice.paid": {
+        const invoice = event.data.object as Stripe.Invoice;
+        const siteKey = await getSiteKeyByCustomerId(invoice.customer as string);
+        if (siteKey) {
+          await adminDb
+            .doc(`siteSettings/${siteKey}`)
+            .update({ subscriptionStatus: "active" });
         }
         break;
       }
 
-      case "invoice.paid": {
-        const invoice = event.data.object as Stripe.Invoice;
-        const siteKey = await getSiteKeyByCustomerId(invoice.customer as string);
-        if (siteKey)
-          await adminDb.doc(`siteSettings/${siteKey}`).update({ subscriptionStatus: "active" });
-        break;
-      }
-
+      // ============================
+      // 🔴 支払い失敗
+      // ============================
       case "invoice.payment_failed": {
         const invoice = event.data.object as Stripe.Invoice;
         const siteKey = await getSiteKeyByCustomerId(invoice.customer as string);
-        if (siteKey)
-          await adminDb.doc(`siteSettings/${siteKey}`).update({ subscriptionStatus: "unpaid" });
+        if (siteKey) {
+          await adminDb
+            .doc(`siteSettings/${siteKey}`)
+            .update({ subscriptionStatus: "unpaid" });
+        }
         break;
       }
 
+      // ============================
+      // ⚫ サブスクリプション削除
+      // ============================
       case "customer.subscription.deleted": {
         const sub = event.data.object as Stripe.Subscription;
         const siteKey = await getSiteKeyByCustomerId(sub.customer as string);
         if (siteKey) {
-          await adminDb.doc(`siteSettings/${siteKey}`).update({ subscriptionStatus: "canceled" });
+          await adminDb
+            .doc(`siteSettings/${siteKey}`)
+            .update({ subscriptionStatus: "canceled" });
           await deleteVercelProject(siteKey);
         }
         break;
       }
 
+      // ============================
+      // その他イベント
+      // ============================
       default:
         console.log(`Unhandled event type: ${event.type}`);
     }
 
     return new NextResponse("OK", { status: 200 });
   } catch (err) {
-    console.error("Webhook error:", err);
+    console.error("🔥 Webhook handler error:", err);
     return new NextResponse("Internal Server Error", { status: 500 });
   }
 }

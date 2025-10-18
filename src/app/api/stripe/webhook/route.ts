@@ -1,7 +1,7 @@
-// app/api/stripe/webhook/route.ts（管理ウェブ側）
-import { stripe } from "@/lib/stripe";                // STRIPE_SECRET_KEY 初期化済み
-import { adminDb } from "@/lib/firebase-admin";       // Firebase Admin SDK
-import { sendMail } from "@/lib/mailer";              // Gmail OAuth2 経由の送信
+// app/api/stripe/webhook/route.ts （管理ウェブ側）
+import { stripe } from "@/lib/stripe";
+import { adminDb } from "@/lib/firebase-admin";
+import { sendMail } from "@/lib/mailer";
 import { headers } from "next/headers";
 import { NextRequest } from "next/server";
 import Stripe from "stripe";
@@ -9,6 +9,7 @@ import Stripe from "stripe";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/* -------------------- 小物 -------------------- */
 type ShippingDetails = {
   address?: {
     city?: string | null;
@@ -23,23 +24,23 @@ type ShippingDetails = {
 };
 
 const ZERO_DEC = new Set([
-  "bif","clp","djf","gnf","jpy","kmf","krw","mga","pyg","rwf","ugx","vnd","vuv","xaf","xof","xpf"
+  "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga", "pyg", "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
 ]);
 const toMajor = (n: number | null | undefined, cur?: string | null) =>
   ZERO_DEC.has((cur ?? "jpy").toLowerCase()) ? (n ?? 0) : (n ?? 0) / 100;
 
-const safeErr = (e: any) => {
+const safeErr = (e: unknown) => {
   try {
-    if (!e) return null;
+    if (!e) return "";
     if (typeof e === "string") return e;
     if (e instanceof Error) return `${e.name}: ${e.message}`;
-    return JSON.stringify(e).slice(0, 2000);
+    return JSON.stringify(e);
   } catch {
     return String(e);
   }
 };
 
-// ---------- Firestore helpers ----------
+/* -------------------- Firestore helpers -------------------- */
 async function findSiteKeyByCustomerId(customerId: string): Promise<string | null> {
   const snap = await adminDb
     .collection("siteSettings")
@@ -55,7 +56,7 @@ async function findSiteKeyByConnectAccount(connectAccountId: string): Promise<st
     .where("stripe.connectAccountId", "==", connectAccountId)
     .limit(1)
     .get();
-  return snap.empty ? null : snap.docs[0].id; // ドキュメントID=siteKey の前提
+  return snap.empty ? null : snap.docs[0].id; // ドキュメントID=siteKey 前提
 }
 
 async function getOwnerEmail(siteKey: string): Promise<string | null> {
@@ -67,10 +68,11 @@ async function getOwnerEmail(siteKey: string): Promise<string | null> {
 async function logOrderMail(rec: {
   siteKey: string | null;
   ownerEmail: string | null;
-  sessionId: string | null;
+  sessionId: string;
+  eventType: string;
   sent: boolean;
   reason?: string | null;
-  eventType: string;
+  extras?: Record<string, unknown>;
 }) {
   const { FieldValue } = await import("firebase-admin/firestore");
   await adminDb.collection("orderMails").add({
@@ -79,29 +81,22 @@ async function logOrderMail(rec: {
   });
 }
 
-// ---------- HTML ----------
-function buildOrderHtml(
-  session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
-  items: Stripe.ApiList<Stripe.LineItem>
-) {
+/* -------------------- HTML -------------------- */
+function buildOrderHtmlFromItems(session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
+                                 items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }>) {
   const cur = (session.currency || "jpy").toUpperCase();
   const s = session.shipping_details, a = s?.address;
-  const addr = [
-    a?.postal_code, a?.state, a?.city, a?.line1, a?.line2, a?.country
-  ].filter(Boolean).join(" ");
+  const addr = [a?.postal_code, a?.state, a?.city, a?.line1, a?.line2, a?.country].filter(Boolean).join(" ");
   const buyer = session.customer_details?.email || session.customer_email || "-";
   const total = toMajor(session.amount_total, session.currency);
 
-  const rows = items.data.map(li => {
-    const p = li.price?.product as Stripe.Product | undefined;
-    const name = p?.name || li.description || "商品";
-    const qty = li.quantity || 1;
-    const sub = toMajor(li.amount_subtotal ?? li.amount_total ?? 0, session.currency);
-    const unit = sub / (qty || 1);
+  const rows = items.map((it) => {
+    const unit = it.unitAmount;
+    const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
     return `<tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #eee;">${name}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
       <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(unit).toLocaleString()}</td>
-      <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${qty}</td>
+      <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
       <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(sub).toLocaleString()}</td>
     </tr>`;
   }).join("");
@@ -128,13 +123,13 @@ function buildOrderHtml(
   </div>`;
 }
 
+/* ============================================================
+   Webhook
+============================================================ */
 export async function POST(req: NextRequest) {
   const rawBody = await req.arrayBuffer();
   const sig = (await headers()).get("stripe-signature");
-
-  if (!sig) {
-    return new Response("Missing stripe-signature header", { status: 400 });
-  }
+  if (!sig) return new Response("Missing stripe-signature header", { status: 400 });
 
   let event: Stripe.Event;
   try {
@@ -143,9 +138,9 @@ export async function POST(req: NextRequest) {
       sig,
       process.env.STRIPE_WEBHOOK_SECRET!
     );
-  } catch (err: any) {
-    console.error("❌ Webhook signature verification failed:", err?.message || err);
-    return new Response(`Webhook Error: ${err?.message ?? "invalid signature"}`, { status: 400 });
+  } catch (err) {
+    console.error("❌ Webhook signature verification failed:", safeErr(err));
+    return new Response("Webhook Error", { status: 400 });
   }
 
   const eventType = event.type;
@@ -153,45 +148,36 @@ export async function POST(req: NextRequest) {
   const reqOpts = connectedAccountId ? { stripeAccount: connectedAccountId } : undefined;
 
   if (eventType !== "checkout.session.completed") {
-    return new Response("Unhandled event type", { status: 200 });
+    return new Response("OK", { status: 200 });
   }
 
   const session = event.data.object as Stripe.Checkout.Session & {
-    metadata?: { siteKey?: string };
+    metadata?: { siteKey?: string; items?: string };
     shipping_details?: ShippingDetails;
   };
 
   try {
-    // ========= 1) Firestore 保存（既存ロジックを保持） =========
-    const {
-      id,
-      amount_total,
-      currency,
-      payment_status,
-      customer_details,
-      metadata,
-    } = session;
-
-    const itemsFromMeta = metadata?.items ? JSON.parse(metadata.items) : [];
+    /* ---------- 1) Firestore保存（既存の仕様維持） ---------- */
+    const itemsFromMeta: Array<{ name: string; qty: number; unitAmount: number }> =
+      session.metadata?.items ? JSON.parse(session.metadata.items) : [];
 
     await adminDb.collection("siteOrders").add({
-      siteKey: metadata?.siteKey || null,
-      createdAt: new Date(), // 既存の挙動を維持（必要なら serverTimestamp に変更可）
-      stripeCheckoutSessionId: id,
-      amount: amount_total,
-      currency,
-      payment_status,
+      siteKey: session.metadata?.siteKey || null,
+      createdAt: new Date(),
+      stripeCheckoutSessionId: session.id,
+      amount: session.amount_total,
+      currency: session.currency,
+      payment_status: session.payment_status,
       customer: {
-        email: customer_details?.email ?? null,
-        name: customer_details?.name ?? null,
-        address: customer_details?.address ?? null,
+        email: session.customer_details?.email ?? null,
+        name: session.customer_details?.name ?? null,
+        address: session.customer_details?.address ?? null,
       },
       items: itemsFromMeta,
     });
 
-    // ========= 2) siteKey の確実な解決 =========
+    /* ---------- 2) siteKey 解決（確実に） ---------- */
     const customerId = (session.customer as string) || null;
-
     const siteKey: string | null =
       session.metadata?.siteKey
       ?? (connectedAccountId ? await findSiteKeyByConnectAccount(connectedAccountId) : null)
@@ -203,6 +189,7 @@ export async function POST(req: NextRequest) {
       siteKey,
       connectedAccountId,
       hasCustomer: !!customerId,
+      hasMetaItems: itemsFromMeta.length > 0,
     });
 
     if (!siteKey) {
@@ -210,85 +197,100 @@ export async function POST(req: NextRequest) {
         siteKey: null,
         ownerEmail: null,
         sessionId: session.id,
-        sent: false,
-        reason: "siteKey unresolved (metadata / event.account / client_reference_id / customer)",
         eventType,
+        sent: false,
+        reason: "siteKey unresolved",
+        extras: { connectedAccountId, customerId, metadata: session.metadata ?? null },
       });
       return new Response("Order saved (no siteKey for mail)", { status: 200 });
     }
 
-    // 初回購入で未保存ならここで stripeCustomerId を反映（将来の逆引き用）
+    // 初回購入で未保存なら stripeCustomerId を保存
     if (customerId) {
-      await adminDb.doc(`siteSettings/${siteKey}`).set(
-        { stripeCustomerId: customerId },
-        { merge: true }
-      );
+      await adminDb.doc(`siteSettings/${siteKey}`).set({ stripeCustomerId: customerId }, { merge: true });
     }
 
-    // ========= 3) メール送信用の line items を Stripe から取得 =========
-    let lineItems: Stripe.ApiList<Stripe.LineItem>;
-    try {
-      lineItems = await stripe.checkout.sessions.listLineItems(
-        session.id,
-        { expand: ["data.price.product"], limit: 100 },
-        reqOpts
-      );
-    } catch (e) {
-      await logOrderMail({
-        siteKey,
-        ownerEmail: null,
-        sessionId: session.id,
-        sent: false,
-        reason: `listLineItems failed: ${safeErr(e)}`,
-        eventType,
-      });
-      return new Response("Order saved (lineItems failed)", { status: 200 });
-    }
-
-    // ========= 4) ownerEmail を取得して送信 =========
+    /* ---------- 3) ownerEmail 取得 ---------- */
     const ownerEmail = await getOwnerEmail(siteKey);
     if (!ownerEmail) {
       await logOrderMail({
         siteKey,
         ownerEmail: null,
         sessionId: session.id,
+        eventType,
         sent: false,
         reason: `ownerEmail not found at siteSettings/${siteKey}`,
-        eventType,
       });
       return new Response("Order saved (no ownerEmail)", { status: 200 });
     }
 
-    const html = buildOrderHtml(session, lineItems);
+    /* ---------- 4) メール本文の items を準備 ---------- */
+    // まず metadata.items を使う（最も安定）
+    let mailItems: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }> = itemsFromMeta;
 
+    // metadata が無い/不足のときのみ Stripe API で補完
+    if (!mailItems.length) {
+      try {
+        const li = await stripe.checkout.sessions.listLineItems(
+          session.id,
+          { expand: ["data.price.product"], limit: 100 },
+          reqOpts
+        );
+        mailItems = li.data.map((x) => {
+          const name = (x.price?.product as Stripe.Product | undefined)?.name || x.description || "商品";
+          const qty = x.quantity || 1;
+          const subtotal = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
+          const unit = subtotal / qty;
+          return { name, qty, unitAmount: unit, subtotal };
+        });
+      } catch (e) {
+        // 取得失敗してもメールは送る（商品名だけ「不明」でフォールバック）
+        console.warn("⚠️ listLineItems failed, fallback to minimal:", safeErr(e));
+        mailItems = [{ name: "（明細の取得に失敗）", qty: 1, unitAmount: toMajor(session.amount_total, session.currency) }];
+      }
+    }
+
+    const html = buildOrderHtmlFromItems(session, mailItems);
+
+    /* ---------- 5) 送信 ---------- */
     try {
       await sendMail({
         to: ownerEmail,
         subject: "【注文通知】新しい注文が完了しました",
         html,
+        // replyTo: session.customer_details?.email || undefined, // ←必要なら有効化
       });
       console.log("📧 order email sent to", ownerEmail);
       await logOrderMail({
         siteKey,
         ownerEmail,
         sessionId: session.id,
-        sent: true,
         eventType,
+        sent: true,
       });
     } catch (e) {
+      console.error("❌ sendMail failed:", safeErr(e));
       await logOrderMail({
         siteKey,
         ownerEmail,
         sessionId: session.id,
+        eventType,
         sent: false,
         reason: `sendMail failed: ${safeErr(e)}`,
-        eventType,
       });
     }
 
     return new Response("Order saved & mail handled", { status: 200 });
   } catch (err) {
     console.error("🔥 webhook handler error:", safeErr(err));
+    await logOrderMail({
+      siteKey: session.metadata?.siteKey ?? null,
+      ownerEmail: null,
+      sessionId: session.id,
+      eventType,
+      sent: false,
+      reason: `handler error: ${safeErr(err)}`,
+    });
     return new Response("Internal Server Error", { status: 500 });
   }
 }

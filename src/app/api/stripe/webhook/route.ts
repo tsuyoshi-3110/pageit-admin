@@ -1,4 +1,4 @@
-// app/api/stripe/webhook/route.ts （管理ウェブ側）
+// app/api/stripe/webhook/route.ts（管理ウェブ側）
 import { stripe } from "@/lib/stripe";
 import { adminDb } from "@/lib/firebase-admin";
 import { sendMail } from "@/lib/mailer";
@@ -9,7 +9,7 @@ import Stripe from "stripe";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* -------------------- 小物 -------------------- */
+/* -------------------- 型・ユーティリティ -------------------- */
 type ShippingDetails = {
   address?: {
     city?: string | null;
@@ -24,7 +24,7 @@ type ShippingDetails = {
 };
 
 const ZERO_DEC = new Set([
-  "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga", "pyg", "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
+  "bif","clp","djf","gnf","jpy","kmf","krw","mga","pyg","rwf","ugx","vnd","vuv","xaf","xof","xpf",
 ]);
 const toMajor = (n: number | null | undefined, cur?: string | null) =>
   ZERO_DEC.has((cur ?? "jpy").toLowerCase()) ? (n ?? 0) : (n ?? 0) / 100;
@@ -81,22 +81,21 @@ async function logOrderMail(rec: {
   });
 }
 
-/* -------------------- HTML -------------------- */
-// ★ shipping_details がないときは customer_details を使うフォールバックを追加
+/* -------------------- メールHTML -------------------- */
 function buildOrderHtmlFromItems(
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
   items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }>
 ) {
   const cur = (session.currency || "jpy").toUpperCase();
 
+  // shipping_details が無い環境でも customer_details をフォールバックで使う
   const ship = (session as any).shipping_details as
     | { name?: string | null; phone?: string | null; address?: Stripe.Address | null }
     | undefined;
-
   const cust = session.customer_details;
 
   const name = ship?.name ?? cust?.name ?? "-";
-  const phone = ship?.phone ?? cust?.phone ?? "-";
+  const phone = cust?.phone ?? ship?.phone ?? "-"; // ← 電話は customer_details を優先
   const addrObj: Stripe.Address | undefined = ship?.address ?? cust?.address ?? undefined;
 
   const addr = [
@@ -182,9 +181,15 @@ export async function POST(req: NextRequest) {
   };
 
   try {
-    /* ---------- 1) Firestore保存（既存の仕様維持） ---------- */
+    /* ---------- 1) Firestore 保存（電話番号も保存） ---------- */
     const itemsFromMeta: Array<{ name: string; qty: number; unitAmount: number }> =
       session.metadata?.items ? JSON.parse(session.metadata.items) : [];
+
+    // 電話番号は customer_details.phone を優先、無ければ shipping_details.phone
+    const customerPhone =
+      session.customer_details?.phone ??
+      (session as any).shipping_details?.phone ??
+      null;
 
     await adminDb.collection("siteOrders").add({
       siteKey: session.metadata?.siteKey || null,
@@ -195,13 +200,17 @@ export async function POST(req: NextRequest) {
       payment_status: session.payment_status,
       customer: {
         email: session.customer_details?.email ?? null,
-        name: session.customer_details?.name ?? null,
-        address: session.customer_details?.address ?? null,
+        name: session.customer_details?.name ?? (session as any).shipping_details?.name ?? null,
+        phone: customerPhone, // ← 追加保存
+        address:
+          session.customer_details?.address ??
+          (session as any).shipping_details?.address ??
+          null,
       },
       items: itemsFromMeta,
     });
 
-    /* ---------- 2) siteKey 解決（確実に） ---------- */
+    /* ---------- 2) siteKey 解決 ---------- */
     const customerId = (session.customer as string) || null;
     const siteKey: string | null =
       session.metadata?.siteKey
@@ -217,6 +226,7 @@ export async function POST(req: NextRequest) {
       hasMetaItems: itemsFromMeta.length > 0,
       hasShipping: !!(session as any).shipping_details,
       hasCustomerAddress: !!session.customer_details?.address,
+      hasPhone: !!customerPhone,
     });
 
     if (!siteKey) {
@@ -251,11 +261,9 @@ export async function POST(req: NextRequest) {
       return new Response("Order saved (no ownerEmail)", { status: 200 });
     }
 
-    /* ---------- 4) メール本文の items を準備 ---------- */
-    // まず metadata.items を使う（最も安定）
+    /* ---------- 4) メール items 準備（metadata 優先、なければ Stripe から取得） ---------- */
     let mailItems: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }> = itemsFromMeta;
 
-    // metadata が無い/不足のときのみ Stripe API で補完
     if (!mailItems.length) {
       try {
         const li = await stripe.checkout.sessions.listLineItems(
@@ -284,7 +292,7 @@ export async function POST(req: NextRequest) {
         to: ownerEmail,
         subject: "【注文通知】新しい注文が完了しました",
         html,
-        // replyTo: session.customer_details?.email || undefined, // 必要なら有効化
+        // replyTo: session.customer_details?.email || undefined,
       });
       console.log("📧 order email sent to", ownerEmail);
       await logOrderMail({

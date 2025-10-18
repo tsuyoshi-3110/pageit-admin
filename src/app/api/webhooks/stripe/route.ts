@@ -21,55 +21,30 @@ type ShippingDetails = {
   phone?: string | null;
 };
 
-const ZERO_DEC = new Set([
-  "bif",
-  "clp",
-  "djf",
-  "gnf",
-  "jpy",
-  "kmf",
-  "krw",
-  "mga",
-  "pyg",
-  "rwf",
-  "ugx",
-  "vnd",
-  "vuv",
-  "xaf",
-  "xof",
-  "xpf",
-]);
-const toMajor = (n: number | null | undefined, cur?: string | null) =>
-  ZERO_DEC.has((cur ?? "jpy").toLowerCase()) ? n ?? 0 : (n ?? 0) / 100;
+const ZERO_DEC = new Set(["bif","clp","djf","gnf","jpy","kmf","krw","mga","pyg","rwf","ugx","vnd","vuv","xaf","xof","xpf"]);
+const toMajor = (n:number|null|undefined, cur?:string|null) =>
+  ZERO_DEC.has((cur ?? "jpy").toLowerCase()) ? (n ?? 0) : (n ?? 0) / 100;
 
-const safeErr = (e: any) => {
+const safeErr = (e:any) => {
   try {
     if (!e) return null;
     if (typeof e === "string") return e;
     if (e instanceof Error) return `${e.name}: ${e.message}`;
     return JSON.stringify(e).slice(0, 2000);
-  } catch {
-    return String(e);
-  }
+  } catch { return String(e); }
 };
 
 // ---------- Firestore helpers ----------
-async function findSiteKeyByCustomerId(
-  customerId: string
-): Promise<string | null> {
-  const snap = await adminDb
-    .collection("siteSettings")
+async function findSiteKeyByCustomerId(customerId: string): Promise<string|null> {
+  const snap = await adminDb.collection("siteSettings")
     .where("stripeCustomerId", "==", customerId)
     .limit(1)
     .get();
   return snap.empty ? null : snap.docs[0].id;
 }
 
-async function findSiteKeyByConnectAccount(
-  connectAccountId: string
-): Promise<string | null> {
-  const snap = await adminDb
-    .collection("siteSellers")
+async function findSiteKeyByConnectAccount(connectAccountId: string): Promise<string|null> {
+  const snap = await adminDb.collection("siteSellers")
     .where("stripe.connectAccountId", "==", connectAccountId)
     .limit(1)
     .get();
@@ -78,7 +53,7 @@ async function findSiteKeyByConnectAccount(
   return snap.docs[0].id;
 }
 
-async function getOwnerEmail(siteKey: string): Promise<string | null> {
+async function getOwnerEmail(siteKey: string): Promise<string|null> {
   const doc = await adminDb.doc(`siteSettings/${siteKey}`).get();
   const email = doc.get("ownerEmail");
   return typeof email === "string" ? email : null;
@@ -86,20 +61,18 @@ async function getOwnerEmail(siteKey: string): Promise<string | null> {
 
 async function saveCustomerId(siteKey: string, customerId: string | null) {
   if (!customerId) return;
-  await adminDb
-    .doc(`siteSettings/${siteKey}`)
-    .set(
-      { stripeCustomerId: customerId, subscriptionStatus: "active" },
-      { merge: true }
-    );
+  await adminDb.doc(`siteSettings/${siteKey}`).set(
+    { stripeCustomerId: customerId, subscriptionStatus: "active" },
+    { merge: true }
+  );
 }
 
 async function logOrderMail(rec: {
-  siteKey: string | null;
-  ownerEmail: string | null;
-  sessionId: string | null;
+  siteKey: string|null;
+  ownerEmail: string|null;
+  sessionId: string|null;
   sent: boolean;
-  reason?: string | null;
+  reason?: string|null;
   eventType: string;
 }) {
   const { FieldValue } = await import("firebase-admin/firestore");
@@ -115,51 +88,29 @@ function buildOrderHtml(
   items: Stripe.ApiList<Stripe.LineItem>
 ) {
   const cur = (session.currency || "jpy").toUpperCase();
-  const s = session.shipping_details,
-    a = s?.address;
-  const addr = [
-    a?.postal_code,
-    a?.state,
-    a?.city,
-    a?.line1,
-    a?.line2,
-    a?.country,
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const buyer =
-    session.customer_details?.email || session.customer_email || "-";
+  const s = session.shipping_details, a = s?.address;
+  const addr = [a?.postal_code, a?.state, a?.city, a?.line1, a?.line2, a?.country].filter(Boolean).join(" ");
+  const buyer = session.customer_details?.email || session.customer_email || "-";
   const total = toMajor(session.amount_total, session.currency);
 
-  const rows = items.data
-    .map((li) => {
-      const p = li.price?.product as Stripe.Product | undefined;
-      const name = p?.name || li.description || "商品";
-      const qty = li.quantity || 1;
-      const sub = toMajor(
-        li.amount_subtotal ?? li.amount_total ?? 0,
-        session.currency
-      );
-      const unit = sub / (qty || 1);
-      return `<tr>
+  const rows = items.data.map(li => {
+    const p = li.price?.product as Stripe.Product | undefined;
+    const name = p?.name || li.description || "商品";
+    const qty = li.quantity || 1;
+    const sub = toMajor(li.amount_subtotal ?? li.amount_total ?? 0, session.currency);
+    const unit = sub / (qty || 1);
+    return `<tr>
       <td style="padding:6px 8px;border-bottom:1px solid #eee;">${name}</td>
-      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(
-        unit
-      ).toLocaleString()}</td>
+      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(unit).toLocaleString()}</td>
       <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${qty}</td>
-      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(
-        sub
-      ).toLocaleString()}</td>
+      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(sub).toLocaleString()}</td>
     </tr>`;
-    })
-    .join("");
+  }).join("");
 
   return `
   <div style="font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial;">
     <h2>新しい注文が完了しました</h2>
-    <p>注文ID: <b>${session.id}</b>／支払い: <b>${
-    session.payment_status
-  }</b></p>
+    <p>注文ID: <b>${session.id}</b>／支払い: <b>${session.payment_status}</b></p>
     <p>購入者: <b>${buyer}</b></p>
     <table style="border-collapse:collapse;width:100%;max-width:680px;">
       <thead><tr>
@@ -170,13 +121,9 @@ function buildOrderHtml(
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p style="margin-top:12px;">合計: <b>¥${Math.round(
-      total
-    ).toLocaleString()}</b> (${cur})</p>
+    <p style="margin-top:12px;">合計: <b>¥${Math.round(total).toLocaleString()}</b> (${cur})</p>
     <h3>お届け先</h3>
-    <p>氏名：${s?.name || "-"}<br/>電話：${s?.phone || "-"}<br/>住所：${
-    addr || "-"
-  }</p>
+    <p>氏名：${s?.name || "-"}<br/>電話：${s?.phone || "-"}<br/>住所：${addr || "-"}</p>
   </div>`;
 }
 
@@ -196,27 +143,21 @@ export async function POST(req: NextRequest) {
 
   const eventType = event.type;
   const connectedAccountId = (event as any).account as string | undefined;
-  const reqOpts = connectedAccountId
-    ? { stripeAccount: connectedAccountId }
-    : undefined;
+  const reqOpts = connectedAccountId ? { stripeAccount: connectedAccountId } : undefined;
 
   try {
     if (eventType === "checkout.session.completed") {
       const session = event.data.object as Stripe.Checkout.Session & {
-        metadata?: { siteKey?: string };
-        shipping_details?: ShippingDetails;
+        metadata?: { siteKey?: string },
+        shipping_details?: ShippingDetails
       };
 
       // --- siteKey の解決順 ---
       const siteKey: string | null =
-        session.metadata?.siteKey ??
-        (connectedAccountId
-          ? await findSiteKeyByConnectAccount(connectedAccountId)
-          : null) ??
-        session.client_reference_id ??
-        (session.customer
-          ? await findSiteKeyByCustomerId(session.customer as string)
-          : null);
+        session.metadata?.siteKey
+          ?? (connectedAccountId ? await findSiteKeyByConnectAccount(connectedAccountId) : null)
+          ?? session.client_reference_id
+          ?? (session.customer ? await findSiteKeyByCustomerId(session.customer as string) : null);
 
       console.log("🔎 order resolve", {
         sessionId: session.id,
@@ -226,14 +167,7 @@ export async function POST(req: NextRequest) {
       });
 
       if (!siteKey) {
-        await logOrderMail({
-          siteKey: null,
-          ownerEmail: null,
-          sessionId: session.id,
-          sent: false,
-          reason: "siteKey unresolved",
-          eventType,
-        });
+        await logOrderMail({ siteKey: null, ownerEmail: null, sessionId: session.id, sent: false, reason: "siteKey unresolved", eventType });
         return NextResponse.json({ ok: true });
       }
 
@@ -252,12 +186,8 @@ export async function POST(req: NextRequest) {
         );
       } catch (e) {
         await logOrderMail({
-          siteKey,
-          ownerEmail: null,
-          sessionId: session.id,
-          sent: false,
-          reason: `listLineItems failed: ${safeErr(e)}`,
-          eventType,
+          siteKey, ownerEmail: null, sessionId: session.id,
+          sent: false, reason: `listLineItems failed: ${safeErr(e)}`, eventType
         });
         return NextResponse.json({ ok: true });
       }
@@ -265,12 +195,8 @@ export async function POST(req: NextRequest) {
       const ownerEmail = await getOwnerEmail(siteKey);
       if (!ownerEmail) {
         await logOrderMail({
-          siteKey,
-          ownerEmail: null,
-          sessionId: session.id,
-          sent: false,
-          reason: `ownerEmail not found at siteSettings/${siteKey}`,
-          eventType,
+          siteKey, ownerEmail: null, sessionId: session.id,
+          sent: false, reason: `ownerEmail not found at siteSettings/${siteKey}`, eventType
         });
         return NextResponse.json({ ok: true });
       }
@@ -278,27 +204,13 @@ export async function POST(req: NextRequest) {
       const html = buildOrderHtml(session, items);
 
       try {
-        await sendMail({
-          to: ownerEmail,
-          subject: "【注文通知】新しい注文が完了しました",
-          html,
-        });
+        await sendMail({ to: ownerEmail, subject: "【注文通知】新しい注文が完了しました", html });
         console.log("📧 sent to", ownerEmail);
-        await logOrderMail({
-          siteKey,
-          ownerEmail,
-          sessionId: session.id,
-          sent: true,
-          eventType,
-        });
+        await logOrderMail({ siteKey, ownerEmail, sessionId: session.id, sent: true, eventType });
       } catch (e) {
         await logOrderMail({
-          siteKey,
-          ownerEmail,
-          sessionId: session.id,
-          sent: false,
-          reason: `sendMail failed: ${safeErr(e)}`,
-          eventType,
+          siteKey, ownerEmail, sessionId: session.id, sent: false,
+          reason: `sendMail failed: ${safeErr(e)}`, eventType
         });
       }
 
@@ -306,25 +218,15 @@ export async function POST(req: NextRequest) {
     }
 
     // --- オーナーの月額決済（親アカウント側のイベント）：状態だけ更新 ---
-    if (
-      eventType === "invoice.paid" ||
-      eventType === "invoice.payment_failed"
-    ) {
+    if (eventType === "invoice.paid" || eventType === "invoice.payment_failed") {
       const invoice = event.data.object as Stripe.Invoice;
       const customerId = invoice.customer as string;
-      const siteKey = customerId
-        ? await findSiteKeyByCustomerId(customerId)
-        : null;
+      const siteKey = customerId ? await findSiteKeyByCustomerId(customerId) : null;
       if (siteKey) {
-        await adminDb
-          .doc(`siteSettings/${siteKey}`)
-          .set(
-            {
-              subscriptionStatus:
-                eventType === "invoice.paid" ? "active" : "unpaid",
-            },
-            { merge: true }
-          );
+        await adminDb.doc(`siteSettings/${siteKey}`).set(
+          { subscriptionStatus: eventType === "invoice.paid" ? "active" : "unpaid" },
+          { merge: true }
+        );
       }
       return NextResponse.json({ ok: true });
     }

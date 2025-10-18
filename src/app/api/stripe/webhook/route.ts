@@ -314,6 +314,26 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    /* ---------- ★追加：購入者（消費者）にもレシート送信 ---------- */
+    try {
+      const buyerEmail =
+        session.customer_details?.email || session.customer_email || null;
+      if (buyerEmail) {
+        await sendMail({
+          to: buyerEmail,
+          subject: "ご購入ありがとうございます（ご注文のレシート）",
+          html, // 上で生成したレシートHTMLをそのまま利用
+        });
+        console.log("📧 receipt email sent to buyer", buyerEmail);
+      } else {
+        console.log("ℹ️ buyer email not found; receipt skipped");
+      }
+    } catch (e) {
+      console.error("❌ sendMail to buyer failed:", safeErr(e));
+      // 他の処理は継続
+    }
+    /* ---------- ★ここまで追加 ---------- */
+
     return new Response("Order saved & mail handled", { status: 200 });
   } catch (err) {
     console.error("🔥 webhook handler error:", safeErr(err));

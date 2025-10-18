@@ -82,24 +82,49 @@ async function logOrderMail(rec: {
 }
 
 /* -------------------- HTML -------------------- */
-function buildOrderHtmlFromItems(session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
-                                 items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }>) {
+// ★ shipping_details がないときは customer_details を使うフォールバックを追加
+function buildOrderHtmlFromItems(
+  session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
+  items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }>
+) {
   const cur = (session.currency || "jpy").toUpperCase();
-  const s = session.shipping_details, a = s?.address;
-  const addr = [a?.postal_code, a?.state, a?.city, a?.line1, a?.line2, a?.country].filter(Boolean).join(" ");
-  const buyer = session.customer_details?.email || session.customer_email || "-";
+
+  const ship = (session as any).shipping_details as
+    | { name?: string | null; phone?: string | null; address?: Stripe.Address | null }
+    | undefined;
+
+  const cust = session.customer_details;
+
+  const name = ship?.name ?? cust?.name ?? "-";
+  const phone = ship?.phone ?? cust?.phone ?? "-";
+  const addrObj: Stripe.Address | undefined = ship?.address ?? cust?.address ?? undefined;
+
+  const addr = [
+    addrObj?.postal_code ? `〒${addrObj.postal_code}` : "",
+    addrObj?.state,
+    addrObj?.city,
+    addrObj?.line1,
+    addrObj?.line2,
+    addrObj?.country && addrObj.country !== "JP" ? addrObj.country : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const buyer = cust?.email || session.customer_email || "-";
   const total = toMajor(session.amount_total, session.currency);
 
-  const rows = items.map((it) => {
-    const unit = it.unitAmount;
-    const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
-    return `<tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
-      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(unit).toLocaleString()}</td>
-      <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
-      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(sub).toLocaleString()}</td>
-    </tr>`;
-  }).join("");
+  const rows = items
+    .map((it) => {
+      const unit = it.unitAmount;
+      const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
+      return `<tr>
+        <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(unit).toLocaleString()}</td>
+        <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(sub).toLocaleString()}</td>
+      </tr>`;
+    })
+    .join("");
 
   return `
   <div style="font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial;">
@@ -117,7 +142,7 @@ function buildOrderHtmlFromItems(session: Stripe.Checkout.Session & { shipping_d
     </table>
     <p style="margin-top:12px;">合計: <b>¥${Math.round(total).toLocaleString()}</b> (${cur})</p>
     <h3>お届け先</h3>
-    <p>氏名：${s?.name || "-"}<br/>電話：${s?.phone || "-"}<br/>住所：${addr || "-"}</p>
+    <p>氏名：${name}<br/>電話：${phone}<br/>住所：${addr || "-"}</p>
     <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
     <p style="color:#666;font-size:12px;">このメールは Stripe Webhook により自動送信されています。</p>
   </div>`;
@@ -190,6 +215,8 @@ export async function POST(req: NextRequest) {
       connectedAccountId,
       hasCustomer: !!customerId,
       hasMetaItems: itemsFromMeta.length > 0,
+      hasShipping: !!(session as any).shipping_details,
+      hasCustomerAddress: !!session.customer_details?.address,
     });
 
     if (!siteKey) {
@@ -240,11 +267,10 @@ export async function POST(req: NextRequest) {
           const name = (x.price?.product as Stripe.Product | undefined)?.name || x.description || "商品";
           const qty = x.quantity || 1;
           const subtotal = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
-          const unit = subtotal / qty;
+          const unit = subtotal / Math.max(1, qty);
           return { name, qty, unitAmount: unit, subtotal };
         });
       } catch (e) {
-        // 取得失敗してもメールは送る（商品名だけ「不明」でフォールバック）
         console.warn("⚠️ listLineItems failed, fallback to minimal:", safeErr(e));
         mailItems = [{ name: "（明細の取得に失敗）", qty: 1, unitAmount: toMajor(session.amount_total, session.currency) }];
       }
@@ -258,7 +284,7 @@ export async function POST(req: NextRequest) {
         to: ownerEmail,
         subject: "【注文通知】新しい注文が完了しました",
         html,
-        // replyTo: session.customer_details?.email || undefined, // ←必要なら有効化
+        // replyTo: session.customer_details?.email || undefined, // 必要なら有効化
       });
       console.log("📧 order email sent to", ownerEmail);
       await logOrderMail({

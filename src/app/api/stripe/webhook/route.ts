@@ -1,7 +1,7 @@
 // app/api/stripe/webhook/route.ts
 import { NextRequest } from "next/server";
 import Stripe from "stripe";
-import { stripe } from "@/lib/stripe";
+import { stripeConnect } from "@/lib/stripe-connect";
 import { adminDb } from "@/lib/firebase-admin";
 import { sendMail } from "@/lib/mailer";
 
@@ -209,7 +209,7 @@ async function buildItemsFromStripe(
   preferLang: LangKey = "en"
 ): Promise<MailItem[]> {
   const fetch = (o?: Stripe.RequestOptions) =>
-    stripe.checkout.sessions.listLineItems(
+    stripeConnect.checkout.sessions.listLineItems(
       session.id,
       { limit: 100, expand: ["data.price.product"] },
       o
@@ -409,7 +409,7 @@ export async function POST(req: NextRequest) {
 
   let event: Stripe.Event;
   try {
-    event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!);
+    event = stripeConnect.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!);
   } catch (err) {
     console.error("❌ Webhook signature verification failed:", safeErr(err));
     await logOrderMail({
@@ -438,12 +438,12 @@ export async function POST(req: NextRequest) {
     let pi: Stripe.PaymentIntent | null = null;
     try {
       try {
-        pi = await stripe.paymentIntents.retrieve(
+        pi = await stripeConnect.paymentIntents.retrieve(
           session.payment_intent as string,
           { expand: ["latest_charge"] }
         );
       } catch {
-        pi = await stripe.paymentIntents.retrieve(
+        pi = await stripeConnect.paymentIntents.retrieve(
           session.payment_intent as string,
           { expand: ["latest_charge"] },
           reqOpts

@@ -530,7 +530,7 @@ function buildBuyerHtmlI18n(
       <table style="border-collapse:collapse;width:100%;max-width:680px;">
         <thead><tr>
           <th style="text-align:left;border-bottom:2px solid #333;">${t.table.name}</th>
-          <th style="text-align:right;border-bottom:2px固体;">${t.table.unit}</th>
+          <th style="text-align:right;border-bottom:2px solid #333;">${t.table.unit}</th>
           <th style="text-align:center;border-bottom:2px solid #333;">${t.table.qty}</th>
           <th style="text-align:right;border-bottom:2px solid #333;">${t.table.subtotal}</th>
         </tr></thead>
@@ -549,7 +549,7 @@ function buildBuyerHtmlI18n(
    Webhook 本体
 ============================================================ */
 export async function POST(req: NextRequest) {
-  const body = await req.text();
+  const body = await req.text(); // Stripeは生テキスト/バイナリが必要
   const sig = (await headers()).get("stripe-signature");
 
   if (!sig) {
@@ -577,7 +577,7 @@ export async function POST(req: NextRequest) {
 
   const type = event.type;
   const connectedAccountId = (event as any).account as string | undefined;
-  const reqOpts = connectedAccountId ? { stripeAccount: connectedAccountId } : undefined;
+  const reqOpts: Stripe.RequestOptions | undefined = connectedAccountId ? { stripeAccount: connectedAccountId } : undefined;
 
   if (type !== "checkout.session.completed") {
     return new Response("OK", { status: 200 });
@@ -594,7 +594,8 @@ export async function POST(req: NextRequest) {
     try {
       pi = await stripe.paymentIntents.retrieve(
         session.payment_intent as string,
-        { expand: ["latest_charge"], ...reqOpts }
+        { expand: ["latest_charge"] },
+        reqOpts
       );
     } catch (e) {
       console.warn("⚠️ paymentIntents.retrieve failed:", safeErr(e));
@@ -643,8 +644,7 @@ export async function POST(req: NextRequest) {
           null,
       },
       items: items.map(i => ({
-        // Firestoreにはデフォルト名だけ保存（必要なら names も保存可）
-        name: i.names.default,
+        name: i.names.default, // 必要に応じて names も保存可
         qty: i.qty,
         unitAmount: i.unitAmount,
         subtotal: i.subtotal,

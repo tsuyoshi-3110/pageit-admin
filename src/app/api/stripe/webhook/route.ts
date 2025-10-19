@@ -22,7 +22,10 @@ type ShippingDetails = {
   phone?: string | null;
 };
 
-const ZERO_DEC = new Set(["bif","clp","djf","gnf","jpy","kmf","krw","mga","pyg","rwf","ugx","vnd","vuv","xaf","xof","xpf"]);
+const ZERO_DEC = new Set([
+  "bif","clp","djf","gnf","jpy","kmf","krw","mga","pyg",
+  "rwf","ugx","vnd","vuv","xaf","xof","xpf",
+]);
 const toMajor = (n: number | null | undefined, cur?: string | null) =>
   ZERO_DEC.has((cur ?? "jpy").toLowerCase()) ? (n ?? 0) : (n ?? 0) / 100;
 
@@ -39,8 +42,10 @@ const fmtCur = (n: number, cur?: string, locale = "en") => {
   const c = (cur ?? "jpy").toUpperCase();
   const zero = ZERO_DEC.has(c.toLowerCase());
   return new Intl.NumberFormat(locale, {
-    style: "currency", currency: c,
-    maximumFractionDigits: zero ? 0 : 2, minimumFractionDigits: zero ? 0 : 2,
+    style: "currency",
+    currency: c,
+    maximumFractionDigits: zero ? 0 : 2,
+    minimumFractionDigits: zero ? 0 : 2,
   }).format(n);
 };
 
@@ -191,14 +196,17 @@ type MailItem = {
 };
 const getName = (mi: MailItem, lang: LangKey): string => mi.names[lang] || mi.names.default;
 
-/** Line Items を取得して “表示名” を決定
- *  - ✅ x.description（Checkout で表示されていた行名）を最優先
- *  - ✅ Product.metadata の name_ja / name_{lang} を上書きマージ
- *  - ✅ まず platform スコープで取得 → 失敗時 connected 側で再トライ
+/**
+ * Line Items を取得して “表示名” を決定
+ *  - x.description（Checkout で表示されていた行名）を最優先
+ *  - Product.metadata の name_{lang} を優先採用（なければ name / product.name）
+ *  - まず接続アカウント（event.account）で取得 → 展開失敗時はプラットフォームで取り直し
+ *  - 豊富なログを出力（調査用）
  */
 async function buildItemsFromStripe(
   session: Stripe.Checkout.Session,
-  reqOpts?: Stripe.RequestOptions   // { stripeAccount: connectedAccountId }
+  reqOpts?: Stripe.RequestOptions,      // { stripeAccount: connectedAccountId }
+  preferLang: LangKey = "en"
 ): Promise<MailItem[]> {
   const fetch = (o?: Stripe.RequestOptions) =>
     stripe.checkout.sessions.listLineItems(
@@ -207,29 +215,40 @@ async function buildItemsFromStripe(
       o
     );
 
-  // 1) 接続アカウント優先（event.account があるなら）
+  // 接続アカウント優先で取得 → product が文字列なら反対スコープで再取得
+  let scope: "connected" | "platform" = reqOpts ? "connected" : "platform";
   let li = reqOpts ? await fetch(reqOpts) : await fetch();
 
-  // 2) product が ID 文字列 or description が空なら、もう一方のスコープで再取得
-  const needsRefetch = li.data.some(
-    d => typeof d.price?.product === "string" || !d.description
-  );
-  if (needsRefetch) {
+  const notExpanded = li.data.some(d => typeof d.price?.product === "string");
+  if (notExpanded) {
     li = reqOpts ? await fetch() : await fetch(reqOpts);
+    scope = scope === "connected" ? "platform" : "connected";
   }
 
-  const langs: LangKey[] = ["ja","en","fr","es","de","it","pt","pt-BR","ko","zh","zh-TW","ru","th","vi","id"];
+  console.log("[webhook] listLineItems:", {
+    scope,
+    sessionId: session.id,
+    locale: session.locale,
+    currency: session.currency,
+    sessionMeta: session.metadata ?? null,
+    count: li.data.length,
+  });
 
-  return li.data.map((x) => {
+  const langs: LangKey[] = ["ja","en","fr","es","de","it","pt","pt-BR","ko","zh","zh-TW","ru","th","vi","id"];
+  const base = preferLang.split("-")[0] as LangKey;
+
+  return li.data.map((x, idx) => {
     const prod = typeof x.price?.product === "string" ? undefined : (x.price?.product as Stripe.Product);
     const md = (prod?.metadata ?? {}) as Record<string, string>;
+    const desc = (x.description || "").trim();
 
-    // ✅ Checkout の行名を最優先
-    const defaultName =
-      (x.description && x.description.trim()) ||
-      prod?.name ||
-      md.name ||
-      "Item";
+    // 選択言語を最優先
+    const metaPrefer =
+      md[`name_${preferLang}`] ||
+      md[`name_${base}`] ||
+      md.name;
+
+    const defaultName = desc || metaPrefer || prod?.name || "Item";
 
     const names: MailItem["names"] = { default: defaultName };
     for (const lk of langs) {
@@ -243,10 +262,20 @@ async function buildItemsFromStripe(
     const subMajor = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
     const unitMajor = subMajor / Math.max(1, qty);
 
+    // デバッグ：各行の決定根拠
+    console.log("[webhook] li", idx, {
+      description: desc || null,
+      productExpanded: !!prod,
+      productId: prod?.id,
+      productName: prod?.name || null,
+      mdKeys: Object.keys(md),
+      preferLang,
+      picked: defaultName,
+    });
+
     return { names, qty, unitAmount: unitMajor, subtotal: subMajor };
   });
 }
-
 
 /* ----------------------------- HTML ----------------------------- */
 function buildOwnerHtmlJa(
@@ -408,11 +437,17 @@ export async function POST(req: NextRequest) {
     /* A) PaymentIntent / 決済手段 & 電話番号 */
     let pi: Stripe.PaymentIntent | null = null;
     try {
-      // destination charge なので platform で取れる。失敗したら connected で再トライ
       try {
-        pi = await stripe.paymentIntents.retrieve(session.payment_intent as string, { expand: ["latest_charge"] });
+        pi = await stripe.paymentIntents.retrieve(
+          session.payment_intent as string,
+          { expand: ["latest_charge"] }
+        );
       } catch {
-        pi = await stripe.paymentIntents.retrieve(session.payment_intent as string, { expand: ["latest_charge"] }, reqOpts);
+        pi = await stripe.paymentIntents.retrieve(
+          session.payment_intent as string,
+          { expand: ["latest_charge"] },
+          reqOpts
+        );
       }
     } catch (e) {
       console.warn("⚠️ paymentIntents.retrieve failed:", safeErr(e));
@@ -429,18 +464,21 @@ export async function POST(req: NextRequest) {
       ch?.billing_details?.phone ??
       null;
 
-    /* B) 明細（description最優先＋product.metadata） */
-    const buyerLang = normalizeLang(session.metadata?.lang || session.metadata?.uiLang || (session.locale as any) || "en");
+    /* B) 明細（description最優先＋metadata.name_{lang}） */
+    const buyerLang = normalizeLang(
+      session.metadata?.lang || session.metadata?.uiLang || (session.locale as any) || "en"
+    );
+
     let items: MailItem[] = [];
     try {
-      items = await buildItemsFromStripe(session, reqOpts);
+      items = await buildItemsFromStripe(session, reqOpts, buyerLang);
     } catch (e) {
       console.error("❌ listLineItems failed:", safeErr(e));
       const totalMajor = toMajor(session.amount_total, session.currency);
       items = [{ names: { default: "Item" }, qty: 1, unitAmount: totalMajor, subtotal: totalMajor }];
     }
 
-    /* C) Firestore 保存 */
+    /* C) Firestore 保存（default は表示名。必要なら buyerLang 優先へ） */
     await adminDb.collection("siteOrders").add({
       siteKey: session.metadata?.siteKey || null,
       createdAt: new Date(),
@@ -461,7 +499,7 @@ export async function POST(req: NextRequest) {
           null,
       },
       items: items.map(i => ({
-        name: i.names.default, // 保存は default（Checkout 表示名）で十分
+        name: i.names[buyerLang] ?? i.names.ja ?? i.names.default,
         qty: i.qty,
         unitAmount: i.unitAmount,
         subtotal: i.subtotal,

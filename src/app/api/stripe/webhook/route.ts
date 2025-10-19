@@ -198,46 +198,44 @@ const getName = (mi: MailItem, lang: LangKey): string => mi.names[lang] || mi.na
  */
 async function buildItemsFromStripe(
   session: Stripe.Checkout.Session,
-  reqOpts?: Stripe.RequestOptions  // connected 側
+  reqOpts?: Stripe.RequestOptions   // { stripeAccount: connectedAccountId }
 ): Promise<MailItem[]> {
-  let li: Stripe.ApiList<Stripe.LineItem>;
-  try {
-    li = await stripe.checkout.sessions.listLineItems(
-      session.id, { limit: 100, expand: ["data.price.product"] } // platform
+  const fetch = (o?: Stripe.RequestOptions) =>
+    stripe.checkout.sessions.listLineItems(
+      session.id,
+      { limit: 100, expand: ["data.price.product"] },
+      o
     );
-  } catch {
-    li = await stripe.checkout.sessions.listLineItems(
-      session.id, { limit: 100, expand: ["data.price.product"] }, reqOpts // connected
-    );
+
+  // 1) 接続アカウント優先（event.account があるなら）
+  let li = reqOpts ? await fetch(reqOpts) : await fetch();
+
+  // 2) product が ID 文字列 or description が空なら、もう一方のスコープで再取得
+  const needsRefetch = li.data.some(
+    d => typeof d.price?.product === "string" || !d.description
+  );
+  if (needsRefetch) {
+    li = reqOpts ? await fetch() : await fetch(reqOpts);
   }
 
   const langs: LangKey[] = ["ja","en","fr","es","de","it","pt","pt-BR","ko","zh","zh-TW","ru","th","vi","id"];
 
   return li.data.map((x) => {
-    const product = typeof x.price?.product === "string" ? undefined : (x.price?.product as Stripe.Product);
-    const md = (product?.metadata ?? {}) as Record<string, string>;
+    const prod = typeof x.price?.product === "string" ? undefined : (x.price?.product as Stripe.Product);
+    const md = (prod?.metadata ?? {}) as Record<string, string>;
 
-    // ✅ ここが最優先：Checkout で見えていた商品名
-    const descName = (x.description && x.description.trim()) || undefined;
-
-    // Product.metadata に載せた 2言語のみ（ja + 選択言語）を集約
-    const names: MailItem["names"] = { default: "" };
-    for (const lk of langs) {
-      const key = `name_${lk}`;
-      const v = md[key];
-      if (typeof v === "string" && v.trim()) names[lk] = v.trim();
-    }
-    // 互換キー
-    if (!names.ja && typeof md.name === "string" && md.name.trim()) names.ja = md.name.trim();
-
-    // default 名（強い順）
+    // ✅ Checkout の行名を最優先
     const defaultName =
-      descName ||
+      (x.description && x.description.trim()) ||
+      prod?.name ||
       md.name ||
-      product?.name ||
       "Item";
 
-    names.default = defaultName;
+    const names: MailItem["names"] = { default: defaultName };
+    for (const lk of langs) {
+      const v = md[`name_${lk}`];
+      if (typeof v === "string" && v.trim()) names[lk] = v.trim();
+    }
     if (!names.ja) names.ja = defaultName;
     if (!names.en) names.en = defaultName;
 
@@ -248,6 +246,7 @@ async function buildItemsFromStripe(
     return { names, qty, unitAmount: unitMajor, subtotal: subMajor };
   });
 }
+
 
 /* ----------------------------- HTML ----------------------------- */
 function buildOwnerHtmlJa(

@@ -1,22 +1,16 @@
-// 要件：
-//  - オーナー宛メール＝日本語固定（見出し/表ヘッダは日本語）
-//  - 購入者宛メール＝購入時選択言語（metadata.lang、なければ session.locale）
-//  - 金額表記＝購入通貨（session.currency）で統一（単価/小計＝line_items、合計＝session.amount_total）
-//  - 決済手段＝PaymentIntent.latest_charge.payment_method_details から取得・保存
-//  - 電話番号＝customer_details.phone → shipping_details.phone → latest_charge.billing_details.phone
-//  - 失敗時も 200 応答＋ Firestore にログ
-
+// app/api/stripe/webhook/route.ts
+import { NextRequest } from "next/server";
+import Stripe from "stripe";
 import { stripe } from "@/lib/stripe";
 import { adminDb } from "@/lib/firebase-admin";
 import { sendMail } from "@/lib/mailer";
-import { headers } from "next/headers";
-import { NextRequest } from "next/server";
-import Stripe from "stripe";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* -------------------- 型・ユーティリティ -------------------- */
+/* ----------------------------------------------------------------
+   型・ユーティリティ
+---------------------------------------------------------------- */
 type ShippingDetails = {
   address?: {
     city?: string | null;
@@ -62,7 +56,9 @@ const LOCALE_BY_LANG: Record<string, string> = {
   ru: "ru-RU", th: "th-TH", vi: "vi-VN", id: "id-ID",
 };
 
-/* -------------------- Firestore helpers -------------------- */
+/* ----------------------------------------------------------------
+   Firestore helpers
+---------------------------------------------------------------- */
 async function findSiteKeyByCustomerId(customerId: string): Promise<string | null> {
   const snap = await adminDb.collection("siteSettings")
     .where("stripeCustomerId", "==", customerId).limit(1).get();
@@ -91,10 +87,13 @@ async function logOrderMail(rec: {
   await adminDb.collection("orderMails").add({ ...rec, createdAt: FieldValue.serverTimestamp() });
 }
 
-/* -------------------- 言語 -------------------- */
+/* ----------------------------------------------------------------
+   言語
+---------------------------------------------------------------- */
 type LangKey =
   | "ja" | "en" | "fr" | "es" | "de" | "it" | "pt" | "pt-BR" | "ko"
   | "zh" | "zh-TW" | "ru" | "th" | "vi" | "id";
+
 function normalizeLang(input?: string | null): LangKey {
   const v = (input || "").toLowerCase();
   if (!v) return "en";
@@ -116,7 +115,9 @@ function normalizeLang(input?: string | null): LangKey {
   return "en";
 }
 
-/* -------------------- i18n 文言 -------------------- */
+/* ----------------------------------------------------------------
+   i18n 文言
+---------------------------------------------------------------- */
 const buyerText: Record<LangKey, {
   subject: string; heading: string; orderId: string; payment: string; buyer: string;
   table: { name: string; unit: string; qty: string; subtotal: string; };
@@ -199,7 +200,9 @@ const buyerText: Record<LangKey, {
     footer:"Email ini dikirim otomatis oleh Stripe Webhook."},
 };
 
-/* ========================= 明細生成：Stripe line_items から構築 ========================= */
+/* ----------------------------------------------------------------
+   明細生成：Stripe line_items から構築（配列順フォールバック付き）
+---------------------------------------------------------------- */
 type MailItem = {
   names: Partial<Record<LangKey, string>> & { default: string };
   qty: number;
@@ -218,40 +221,72 @@ async function buildItemsFromStripe(
     reqOpts
   );
 
-  // 保険：Checkout で詰めた items_i18n を読む
-  let itemsI18n: Record<string, { qty?: number; names?: Record<string,string> }> = {};
+  // items_i18n を “連想配列(by id)” と “配列（順序保持）” の両方で用意
+  type I18nRow = { id?: string; qty?: number; names?: Record<string, string> };
+  let i18nArray: I18nRow[] = [];
+  let i18nById: Record<string, I18nRow> = {};
   try {
     const raw = (session.metadata as any)?.items_i18n;
     if (raw) {
-      const arr = JSON.parse(raw) as Array<{id:string; qty:number; names?:Record<string,string>}>;
-      itemsI18n = Object.fromEntries(arr.map(o => [o.id, {qty:o.qty, names:o.names||{}}]));
+      i18nArray = JSON.parse(raw) as I18nRow[];
+      i18nById = Object.fromEntries(
+        i18nArray
+          .filter(r => typeof r?.id === "string" && r.id)
+          .map(r => [r.id as string, r])
+      );
     }
-  } catch {}
+  } catch {
+    // no-op
+  }
 
-  return li.data.map((x) => {
-    const prod = x.price?.product as Stripe.Product | undefined;
-    const pid = (prod?.metadata as any)?.productId as string | undefined;
+  return li.data.map((x, idx) => {
+    const prod = x.price?.product as Stripe.Product | string | undefined;
+    const prodObj = (prod && typeof prod !== "string") ? (prod as Stripe.Product) : undefined;
 
-    // 1) name_xx を集める
+    // productId が拾えないケースを考慮（順序でフォールバック）
+    const pid = (prodObj?.metadata as any)?.productId as string | undefined;
+    const rowFromId = pid ? i18nById[pid] : undefined;
+    const rowFromIdx = i18nArray[idx];
+
+    // name_xx を集約（metadata → items_i18n[idx] → items_i18n[id] の優先順）
     const names: MailItem["names"] = { default: "" };
+    const prefer = (langKey: string): string | undefined => {
+      const k = `name_${langKey}`;
+      return (
+        (prodObj?.metadata as any)?.[k] ??
+        rowFromIdx?.names?.[langKey] ??
+        rowFromId?.names?.[langKey]
+      );
+    };
+
     (["ja","en","fr","es","de","it","pt","pt-BR","ko","zh","zh-TW","ru","th","vi","id"] as LangKey[])
-      .forEach((k) => {
-        const key = `name_${k}`;
-        const v = (prod?.metadata as any)?.[key] || itemsI18n[pid||""]?.names?.[k];
-        if (typeof v === "string" && v.trim()) names[k] = v;
+      .forEach((lk) => {
+        const v =
+          prefer(lk) ??
+          // 互換：name が ja のみ入っている旧形式
+          (lk === "ja" ? (prodObj?.metadata as any)?.name : undefined);
+        if (typeof v === "string" && v.trim()) names[lk] = v.trim();
       });
 
-    // 2) 既定名の優先度（“Item” 撲滅）
+    // 既定名（“Item” 落ち回避のため items_i18n も優先度に入れる）
     names.default =
-      (prod?.metadata as any)?.name ||
-      prod?.name ||
-      itemsI18n[pid||""]?.names?.ja ||
+      (prodObj?.metadata as any)?.name ||
+      prodObj?.name ||
+      rowFromIdx?.names?.ja ||
+      rowFromId?.names?.ja ||
+      rowFromIdx?.names?.en ||
+      rowFromId?.names?.en ||
       x.description ||
       "Item";
 
-    const qty = x.quantity || itemsI18n[pid||""]?.qty || 1;
+    // 数量：line_item → items_i18n[idx] → items_i18n[id]
+    const qty =
+      x.quantity ??
+      rowFromIdx?.qty ??
+      rowFromId?.qty ??
+      1;
 
-    // 3) 金額は Stripe line item（購入通貨）
+    // 金額（購入通貨）
     const subMajor = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
     const unitMajor = subMajor / Math.max(1, qty);
 
@@ -259,7 +294,9 @@ async function buildItemsFromStripe(
   });
 }
 
-/* -------------------- メールHTML（オーナー：日本語固定） -------------------- */
+/* ----------------------------------------------------------------
+   メールHTML（オーナー：日本語固定）
+---------------------------------------------------------------- */
 function buildOwnerHtmlJa(
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
   items: MailItem[]
@@ -315,7 +352,9 @@ function buildOwnerHtmlJa(
   </div>`;
 }
 
-/* -------------------- メールHTML（購入者：多言語） -------------------- */
+/* ----------------------------------------------------------------
+   メールHTML（購入者：多言語）
+---------------------------------------------------------------- */
 function buildBuyerHtmlI18n(
   lang: LangKey,
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
@@ -375,27 +414,38 @@ function buildBuyerHtmlI18n(
   };
 }
 
-/* ============================================================
+/* ----------------------------------------------------------------
    Webhook 本体
-============================================================ */
+---------------------------------------------------------------- */
 export async function POST(req: NextRequest) {
+  // 生ボディ＆署名
   const body = await req.text();
-  const sig = (await headers()).get("stripe-signature");
+  const sig = req.headers.get("stripe-signature");
 
   if (!sig) {
     console.error("⚠️ Missing stripe-signature header");
-    await logOrderMail({ siteKey: null, ownerEmail: null, sessionId: null,
-      eventType: "missing_signature", sent: false, reason: "stripe-signature header missing" });
+    await logOrderMail({
+      siteKey: null, ownerEmail: null, sessionId: null,
+      eventType: "missing_signature", sent: false,
+      reason: "stripe-signature header missing",
+    });
     return new Response("OK", { status: 200 });
   }
 
   let event: Stripe.Event;
   try {
-    event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!);
+    event = stripe.webhooks.constructEvent(
+      body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET!
+    );
   } catch (err) {
     console.error("❌ Webhook signature verification failed:", safeErr(err));
-    await logOrderMail({ siteKey: null, ownerEmail: null, sessionId: null,
-      eventType: "signature_error", sent: false, reason: `signature error: ${safeErr(err)}` });
+    await logOrderMail({
+      siteKey: null, ownerEmail: null, sessionId: null,
+      eventType: "signature_error", sent: false,
+      reason: `signature error: ${safeErr(err)}`,
+    });
     return new Response("OK", { status: 200 });
   }
 
@@ -404,7 +454,8 @@ export async function POST(req: NextRequest) {
   }
 
   const connectedAccountId = (event as any).account as string | undefined;
-  const reqOpts: Stripe.RequestOptions | undefined = connectedAccountId ? { stripeAccount: connectedAccountId } : undefined;
+  const reqOpts: Stripe.RequestOptions | undefined =
+    connectedAccountId ? { stripeAccount: connectedAccountId } : undefined;
 
   const session = event.data.object as Stripe.Checkout.Session & {
     metadata?: { siteKey?: string; lang?: string };
@@ -412,7 +463,7 @@ export async function POST(req: NextRequest) {
   };
 
   try {
-    /* ---------- A) PaymentIntent / 決済手段 & 電話番号 ---------- */
+    /* A) PaymentIntent / 決済手段 & 電話番号 */
     let pi: Stripe.PaymentIntent | null = null;
     try {
       pi = await stripe.paymentIntents.retrieve(
@@ -435,8 +486,8 @@ export async function POST(req: NextRequest) {
       ch?.billing_details?.phone ??
       null;
 
-    /* ---------- B) 明細（必ず Stripe line_items 起点） ---------- */
-    const buyerLang = normalizeLang(session.metadata?.lang || (session.locale as string) || "en");
+    /* B) 明細（Stripe line_items 起点） */
+    const buyerLang = normalizeLang(session.metadata?.lang || (session.locale as any) || "en");
     let items: MailItem[] = [];
     try {
       items = await buildItemsFromStripe(session, reqOpts);
@@ -446,7 +497,7 @@ export async function POST(req: NextRequest) {
       items = [{ names: { default: "Item" }, qty: 1, unitAmount: totalMajor, subtotal: totalMajor }];
     }
 
-    /* ---------- C) Firestore 保存 ---------- */
+    /* C) Firestore 保存 */
     await adminDb.collection("siteOrders").add({
       siteKey: session.metadata?.siteKey || null,
       createdAt: new Date(),
@@ -475,7 +526,7 @@ export async function POST(req: NextRequest) {
       buyer_lang: buyerLang,
     });
 
-    /* ---------- D) siteKey 解決 & stripeCustomerId 保存 ---------- */
+    /* D) siteKey 解決 & stripeCustomerId 保存 */
     const customerId = (session.customer as string) || null;
     const siteKey: string | null =
       session.metadata?.siteKey
@@ -484,38 +535,52 @@ export async function POST(req: NextRequest) {
       ?? (customerId ? await findSiteKeyByCustomerId(customerId) : null);
 
     if (siteKey && customerId) {
-      await adminDb.doc(`siteSettings/${siteKey}`).set({ stripeCustomerId: customerId }, { merge: true });
+      await adminDb.doc(`siteSettings/${siteKey}`).set(
+        { stripeCustomerId: customerId },
+        { merge: true }
+      );
     }
 
-    /* ---------- E) オーナー宛（日本語） ---------- */
+    /* E) オーナー宛（日本語固定） */
     if (siteKey) {
       const ownerEmail = await getOwnerEmail(siteKey);
       if (ownerEmail) {
         const ownerHtml = buildOwnerHtmlJa(session, items);
         try {
-          await sendMail({ to: ownerEmail, subject: "【注文通知】新しい注文が完了しました", html: ownerHtml });
-          await logOrderMail({ siteKey, ownerEmail, sessionId: session.id, eventType: event.type, sent: true });
+          await sendMail({
+            to: ownerEmail,
+            subject: "【注文通知】新しい注文が完了しました",
+            html: ownerHtml,
+          });
+          await logOrderMail({
+            siteKey, ownerEmail, sessionId: session.id,
+            eventType: event.type, sent: true,
+          });
         } catch (e) {
           console.error("❌ sendMail(owner) failed:", safeErr(e));
           await logOrderMail({
-            siteKey, ownerEmail, sessionId: session.id, eventType: event.type, sent: false,
+            siteKey, ownerEmail, sessionId: session.id,
+            eventType: event.type, sent: false,
             reason: `sendMail(owner) failed: ${safeErr(e)}`,
           });
         }
       } else {
         await logOrderMail({
-          siteKey, ownerEmail: null, sessionId: session.id, eventType: event.type, sent: false,
+          siteKey, ownerEmail: null, sessionId: session.id,
+          eventType: event.type, sent: false,
           reason: `ownerEmail not found at siteSettings/${siteKey}`,
         });
       }
     } else {
       await logOrderMail({
-        siteKey: null, ownerEmail: null, sessionId: session.id, eventType: event.type, sent: false,
-        reason: "siteKey unresolved", extras: { connectedAccountId, customerId, metadata: session.metadata ?? null },
+        siteKey: null, ownerEmail: null, sessionId: session.id,
+        eventType: event.type, sent: false,
+        reason: "siteKey unresolved",
+        extras: { connectedAccountId, customerId, metadata: session.metadata ?? null },
       });
     }
 
-    /* ---------- F) 購入者宛（多言語） ---------- */
+    /* F) 購入者宛（多言語） */
     try {
       const buyerEmail = session.customer_details?.email || session.customer_email || null;
       if (buyerEmail) {
@@ -530,9 +595,9 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error("🔥 webhook handler error:", safeErr(err));
     await logOrderMail({
-      siteKey: session.metadata?.siteKey ?? null,
+      siteKey: (event.data.object as any)?.metadata?.siteKey ?? null,
       ownerEmail: null,
-      sessionId: session.id,
+      sessionId: (event.data.object as any)?.id ?? null,
       eventType: event.type,
       sent: false,
       reason: `handler error: ${safeErr(err)}`,

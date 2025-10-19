@@ -1,15 +1,22 @@
-// app/api/stripe/webhook/route.ts
-import { NextRequest } from "next/server";
-import { headers } from "next/headers";
-import Stripe from "stripe";
+// 要件：
+//  - オーナー宛メール＝日本語固定（見出し/表ヘッダは日本語）
+//  - 購入者宛メール＝購入時選択言語（metadata.lang、なければ session.locale）
+//  - 金額表記＝購入通貨（session.currency）で統一（単価/小計＝line_items、合計＝session.amount_total）
+//  - 決済手段＝PaymentIntent.latest_charge.payment_method_details から取得・保存
+//  - 電話番号＝customer_details.phone → shipping_details.phone → latest_charge.billing_details.phone
+//  - 失敗時も 200 応答＋ Firestore にログ
+
 import { stripe } from "@/lib/stripe";
 import { adminDb } from "@/lib/firebase-admin";
 import { sendMail } from "@/lib/mailer";
+import { headers } from "next/headers";
+import { NextRequest } from "next/server";
+import Stripe from "stripe";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* ========================= 型/ユーティリティ ========================= */
+/* -------------------- 型・ユーティリティ -------------------- */
 type ShippingDetails = {
   address?: {
     city?: string | null;
@@ -26,9 +33,17 @@ type ShippingDetails = {
 const ZERO_DEC = new Set([
   "bif","clp","djf","gnf","jpy","kmf","krw","mga","pyg","rwf","ugx","vnd","vuv","xaf","xof","xpf",
 ]);
+const toMajor = (n: number | null | undefined, cur?: string | null) =>
+  ZERO_DEC.has((cur ?? "jpy").toLowerCase()) ? (n ?? 0) : (n ?? 0) / 100;
 
-const toMajor = (minor: number | null | undefined, cur?: string | null) =>
-  ZERO_DEC.has((cur ?? "jpy").toLowerCase()) ? (minor ?? 0) : (minor ?? 0) / 100;
+const safeErr = (e: unknown) => {
+  try {
+    if (!e) return "";
+    if (typeof e === "string") return e;
+    if (e instanceof Error) return `${e.name}: ${e.message}`;
+    return JSON.stringify(e);
+  } catch { return String(e); }
+};
 
 const fmtCur = (n: number, cur?: string, locale = "en") => {
   const c = (cur ?? "jpy").toUpperCase();
@@ -41,27 +56,46 @@ const fmtCur = (n: number, cur?: string, locale = "en") => {
   }).format(n);
 };
 
-const safeErr = (e: unknown) => {
-  try {
-    if (!e) return "";
-    if (typeof e === "string") return e;
-    if (e instanceof Error) return `${e.name}: ${e.message}`;
-    return JSON.stringify(e);
-  } catch { return String(e); }
-};
-
-/* ========================= 言語 ========================= */
-type LangKey =
-  | "ja" | "en" | "fr" | "es" | "de" | "it" | "pt" | "pt-BR" | "ko"
-  | "zh" | "zh-TW" | "ru" | "th" | "vi" | "id";
-
-const LOCALE_BY_LANG: Record<LangKey, string> = {
+const LOCALE_BY_LANG: Record<string, string> = {
   ja: "ja-JP", en: "en", fr: "fr-FR", es: "es-ES", de: "de-DE", it: "it-IT",
   pt: "pt-PT", "pt-BR": "pt-BR", ko: "ko-KR", zh: "zh-CN", "zh-TW": "zh-TW",
   ru: "ru-RU", th: "th-TH", vi: "vi-VN", id: "id-ID",
 };
 
-const normalizeLang = (input?: string | null): LangKey => {
+/* -------------------- Firestore helpers -------------------- */
+async function findSiteKeyByCustomerId(customerId: string): Promise<string | null> {
+  const snap = await adminDb.collection("siteSettings")
+    .where("stripeCustomerId", "==", customerId).limit(1).get();
+  return snap.empty ? null : snap.docs[0].id;
+}
+async function findSiteKeyByConnectAccount(connectAccountId: string): Promise<string | null> {
+  const snap = await adminDb.collection("siteSellers")
+    .where("stripe.connectAccountId", "==", connectAccountId).limit(1).get();
+  return snap.empty ? null : snap.docs[0].id;
+}
+async function getOwnerEmail(siteKey: string): Promise<string | null> {
+  const doc = await adminDb.doc(`siteSettings/${siteKey}`).get();
+  const email = doc.get("ownerEmail");
+  return typeof email === "string" ? email : null;
+}
+async function logOrderMail(rec: {
+  siteKey: string | null;
+  ownerEmail: string | null;
+  sessionId: string | null;
+  eventType: string;
+  sent: boolean;
+  reason?: string | null;
+  extras?: Record<string, unknown>;
+}) {
+  const { FieldValue } = await import("firebase-admin/firestore");
+  await adminDb.collection("orderMails").add({ ...rec, createdAt: FieldValue.serverTimestamp() });
+}
+
+/* -------------------- 言語 -------------------- */
+type LangKey =
+  | "ja" | "en" | "fr" | "es" | "de" | "it" | "pt" | "pt-BR" | "ko"
+  | "zh" | "zh-TW" | "ru" | "th" | "vi" | "id";
+function normalizeLang(input?: string | null): LangKey {
   const v = (input || "").toLowerCase();
   if (!v) return "en";
   if (v.startsWith("ja")) return "ja";
@@ -80,120 +114,9 @@ const normalizeLang = (input?: string | null): LangKey => {
   if (v.startsWith("vi")) return "vi";
   if (v.startsWith("id")) return "id";
   return "en";
-};
+}
 
-/* ========================= ログ ========================= */
-const logOrderMail = async (rec: {
-  siteKey: string | null;
-  ownerEmail: string | null;
-  sessionId: string | null;
-  eventType: string;
-  sent: boolean;
-  reason?: string | null;
-  extras?: Record<string, unknown>;
-}) => {
-  const { FieldValue } = await import("firebase-admin/firestore");
-  await adminDb.collection("orderMails").add({ ...rec, createdAt: FieldValue.serverTimestamp() });
-};
-
-/* ========================= 決済手段/電話 ========================= */
-const extractPayment = (pi: Stripe.PaymentIntent | null) => {
-  const ch = (pi?.latest_charge as Stripe.Charge | undefined) || undefined;
-  const d = ch?.payment_method_details as Stripe.Charge.PaymentMethodDetails | undefined;
-  const type = d?.type || undefined;
-  const brand = d?.card?.brand || undefined;
-  const last4 = d?.card?.last4 || undefined;
-  return { type, brand, last4 };
-};
-
-const resolvePhone = (s: Stripe.Checkout.Session, pi: Stripe.PaymentIntent | null): string | undefined => {
-  const a = s.customer_details?.phone || undefined;
-  if (a) return a;
-  const b = (s as any)?.shipping_details?.phone as string | undefined;
-  if (b) return b;
-  const ch = (pi?.latest_charge as Stripe.Charge | undefined) || undefined;
-  return ch?.billing_details?.phone || undefined;
-};
-
-/* ========================= 商品名の解決（"Item"撲滅） ========================= */
-type ResolvedItem = {
-  buyerName: string;      // 購入者向け（選択言語）
-  ownerJaName: string;    // オーナー向け（日本語）
-  qty: number;
-  unitMinor: number;
-  subtotalMinor: number;
-};
-
-const resolveNames = (
-  prod: Stripe.Product | undefined,
-  buyerLang: LangKey,
-  fallbackDesc?: string,
-  fallbackNick?: string
-): { buyerName: string; ownerJaName: string } => {
-  const meta = (prod?.metadata as Record<string, string | undefined>) || {};
-
-  const metaBuyer = meta[`name_${buyerLang}`];
-  const metaJa = meta["name_ja"];
-  const metaAny = meta["name"];
-
-  const buyerName =
-    (metaBuyer && metaBuyer.trim()) ||
-    (prod?.name && prod.name.trim()) ||
-    (fallbackDesc && fallbackDesc.trim()) ||
-    (fallbackNick && fallbackNick.trim()) ||
-    "Item";
-
-  const ownerJaName =
-    (metaJa && metaJa.trim()) ||
-    (metaAny && metaAny.trim()) ||
-    (prod?.name && prod.name.trim()) ||
-    (fallbackDesc && fallbackDesc.trim()) ||
-    (fallbackNick && fallbackNick.trim()) ||
-    "Item";
-
-  return { buyerName, ownerJaName };
-};
-
-const buildResolvedItems = async (
-  session: Stripe.Checkout.Session,
-  buyerLang: LangKey,
-  reqOpts?: Stripe.RequestOptions
-): Promise<ResolvedItem[]> => {
-  const li = await stripe.checkout.sessions.listLineItems(
-    session.id,
-    { limit: 100, expand: ["data.price.product"] },
-    reqOpts
-  );
-
-  return li.data.map((x) => {
-    const qty = x.quantity ?? 1;
-
-    const unitMinor =
-      (x.price?.unit_amount as number | null | undefined) ??
-      Math.round(((x.amount_subtotal || 0) / Math.max(1, qty)));
-
-    const prod =
-      x.price?.product && typeof x.price.product !== "string"
-        ? (x.price.product as Stripe.Product)
-        : undefined;
-
-    // null → undefined へ正規化（型エラー対策）
-    const desc: string | undefined = x.description ?? undefined;
-    const nick: string | undefined = (x.price?.nickname ?? undefined) as string | undefined;
-
-    const { buyerName, ownerJaName } = resolveNames(prod, buyerLang, desc, nick);
-
-    return {
-      buyerName,
-      ownerJaName,
-      qty,
-      unitMinor: Number(unitMinor || 0),
-      subtotalMinor: Number((x.amount_subtotal ?? unitMinor * qty) || 0),
-    };
-  });
-};
-
-/* ========================= メールHTML（オーナー/購入者） ========================= */
+/* -------------------- i18n 文言 -------------------- */
 const buyerText: Record<LangKey, {
   subject: string; heading: string; orderId: string; payment: string; buyer: string;
   table: { name: string; unit: string; qty: string; subtotal: string; };
@@ -241,7 +164,7 @@ const buyerText: Record<LangKey, {
     footer:"Este e-mail foi enviado automaticamente pelo Stripe Webhook."},
   ko:{subject:"구매해 주셔서 감사합니다 (영수증)",heading:"주문해 주셔서 감사합니다",
     orderId:"주문 ID",payment:"결제",buyer:"구매자",
-    table:{name:"상품명",unit:"단价",qty:"수량",subtotal:"소계"},
+    table:{name:"상품명",unit:"단가",qty:"수량",subtotal:"소계"},
     total:"합계",shipTo:"배송지",name:"이름",phone:"전화",address:"주소",
     footer:"이 메일은 Stripe Webhook에 의해 자동 전송되었습니다."},
   zh:{subject:"感谢您的购买（收据）",heading:"感谢您的订单",
@@ -276,20 +199,83 @@ const buyerText: Record<LangKey, {
     footer:"Email ini dikirim otomatis oleh Stripe Webhook."},
 };
 
-const buildOwnerHtmlJa = (
+/* ========================= 明細生成：Stripe line_items から構築 ========================= */
+type MailItem = {
+  names: Partial<Record<LangKey, string>> & { default: string };
+  qty: number;
+  unitAmount: number;
+  subtotal: number;
+};
+const getName = (mi: MailItem, lang: LangKey): string => mi.names[lang] || mi.names.default;
+
+async function buildItemsFromStripe(
+  session: Stripe.Checkout.Session,
+  reqOpts?: Stripe.RequestOptions
+): Promise<MailItem[]> {
+  const li = await stripe.checkout.sessions.listLineItems(
+    session.id,
+    { expand: ["data.price.product"], limit: 100 },
+    reqOpts
+  );
+
+  // 保険：Checkout で詰めた items_i18n を読む
+  let itemsI18n: Record<string, { qty?: number; names?: Record<string,string> }> = {};
+  try {
+    const raw = (session.metadata as any)?.items_i18n;
+    if (raw) {
+      const arr = JSON.parse(raw) as Array<{id:string; qty:number; names?:Record<string,string>}>;
+      itemsI18n = Object.fromEntries(arr.map(o => [o.id, {qty:o.qty, names:o.names||{}}]));
+    }
+  } catch {}
+
+  return li.data.map((x) => {
+    const prod = x.price?.product as Stripe.Product | undefined;
+    const pid = (prod?.metadata as any)?.productId as string | undefined;
+
+    // 1) name_xx を集める
+    const names: MailItem["names"] = { default: "" };
+    (["ja","en","fr","es","de","it","pt","pt-BR","ko","zh","zh-TW","ru","th","vi","id"] as LangKey[])
+      .forEach((k) => {
+        const key = `name_${k}`;
+        const v = (prod?.metadata as any)?.[key] || itemsI18n[pid||""]?.names?.[k];
+        if (typeof v === "string" && v.trim()) names[k] = v;
+      });
+
+    // 2) 既定名の優先度（“Item” 撲滅）
+    names.default =
+      (prod?.metadata as any)?.name ||
+      prod?.name ||
+      itemsI18n[pid||""]?.names?.ja ||
+      x.description ||
+      "Item";
+
+    const qty = x.quantity || itemsI18n[pid||""]?.qty || 1;
+
+    // 3) 金額は Stripe line item（購入通貨）
+    const subMajor = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
+    const unitMajor = subMajor / Math.max(1, qty);
+
+    return { names, qty, unitAmount: unitMajor, subtotal: subMajor };
+  });
+}
+
+/* -------------------- メールHTML（オーナー：日本語固定） -------------------- */
+function buildOwnerHtmlJa(
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
-  items: ResolvedItem[]
-) => {
+  items: MailItem[]
+) {
   const cur = (session.currency || "jpy").toUpperCase();
   const locale = "ja-JP";
-  const total = toMajor(session.amount_total, session.currency);
 
-  const ship = (session as any).shipping_details as { name?: string | null; phone?: string | null; address?: Stripe.Address | null } | undefined;
+  const ship = (session as any).shipping_details as
+    | { name?: string | null; phone?: string | null; address?: Stripe.Address | null }
+    | undefined;
   const cust = session.customer_details;
 
   const name = ship?.name ?? cust?.name ?? "-";
   const phone = cust?.phone ?? ship?.phone ?? "-";
   const addrObj: Stripe.Address | undefined = ship?.address ?? cust?.address ?? undefined;
+
   const addr = [
     addrObj?.postal_code ? `〒${addrObj.postal_code}` : "",
     addrObj?.state, addrObj?.city, addrObj?.line1, addrObj?.line2,
@@ -297,14 +283,15 @@ const buildOwnerHtmlJa = (
   ].filter(Boolean).join(" ");
 
   const buyer = cust?.email || session.customer_email || "-";
+  const total = toMajor(session.amount_total, session.currency);
 
   const rows = items.map((it) => `
-    <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.ownerJaName}</td>
-      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(toMajor(it.unitMinor, session.currency), cur, locale)}</td>
-      <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
-      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(toMajor(it.subtotalMinor, session.currency), cur, locale)}</td>
-    </tr>`).join("");
+      <tr>
+        <td style="padding:6px 8px;border-bottom:1px solid #eee;">${getName(it, "ja")}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(it.unitAmount, cur, locale)}</td>
+        <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(it.subtotal, cur, locale)}</td>
+      </tr>`).join("");
 
   return `
   <div style="font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial;">
@@ -326,38 +313,42 @@ const buildOwnerHtmlJa = (
     <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
     <p style="color:#666;font-size:12px;">このメールは Stripe Webhook により自動送信されています。</p>
   </div>`;
-};
+}
 
-const buildBuyerHtmlI18n = (
+/* -------------------- メールHTML（購入者：多言語） -------------------- */
+function buildBuyerHtmlI18n(
   lang: LangKey,
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
-  items: ResolvedItem[]
-) => {
+  items: MailItem[]
+) {
   const t = buyerText[lang] || buyerText.en;
   const cur = (session.currency || "jpy").toUpperCase();
   const locale = LOCALE_BY_LANG[lang] || "en";
-  const total = toMajor(session.amount_total, session.currency);
 
-  const ship = (session as any).shipping_details as { name?: string | null; phone?: string | null; address?: Stripe.Address | null } | undefined;
+  const ship = (session as any).shipping_details as
+    | { name?: string | null; phone?: string | null; address?: Stripe.Address | null }
+    | undefined;
   const cust = session.customer_details;
 
   const name = ship?.name ?? cust?.name ?? "-";
   const phone = cust?.phone ?? ship?.phone ?? "-";
   const addrObj: Stripe.Address | undefined = ship?.address ?? cust?.address ?? undefined;
+
   const addr = [
     addrObj?.postal_code, addrObj?.state, addrObj?.city, addrObj?.line1, addrObj?.line2,
     addrObj?.country && addrObj?.country !== "JP" ? addrObj.country : "",
   ].filter(Boolean).join(" ");
 
   const buyer = cust?.email || session.customer_email || "-";
+  const total = toMajor(session.amount_total, session.currency);
 
   const rows = items.map((it) => `
-    <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.buyerName}</td>
-      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(toMajor(it.unitMinor, session.currency), cur, locale)}</td>
-      <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
-      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(toMajor(it.subtotalMinor, session.currency), cur, locale)}</td>
-    </tr>`).join("");
+      <tr>
+        <td style="padding:6px 8px;border-bottom:1px solid #eee;">${getName(it, lang)}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(it.unitAmount, cur, locale)}</td>
+        <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(it.subtotal, cur, locale)}</td>
+      </tr>`).join("");
 
   return {
     subject: t.subject,
@@ -382,17 +373,19 @@ const buildBuyerHtmlI18n = (
       <p style="color:#666;font-size:12px;">${t.footer}</p>
     </div>`,
   };
-};
+}
 
-/* ========================= Webhook 本体 ========================= */
+/* ============================================================
+   Webhook 本体
+============================================================ */
 export async function POST(req: NextRequest) {
   const body = await req.text();
-
-  // ★ ここを await に修正（headers() が Promise<ReadonlyHeaders> な環境向け）
   const sig = (await headers()).get("stripe-signature");
 
   if (!sig) {
-    await logOrderMail({ siteKey: null, ownerEmail: null, sessionId: null, eventType: "missing_signature", sent: false, reason: "stripe-signature header missing" });
+    console.error("⚠️ Missing stripe-signature header");
+    await logOrderMail({ siteKey: null, ownerEmail: null, sessionId: null,
+      eventType: "missing_signature", sent: false, reason: "stripe-signature header missing" });
     return new Response("OK", { status: 200 });
   }
 
@@ -400,7 +393,9 @@ export async function POST(req: NextRequest) {
   try {
     event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!);
   } catch (err) {
-    await logOrderMail({ siteKey: null, ownerEmail: null, sessionId: null, eventType: "signature_error", sent: false, reason: `signature error: ${safeErr(err)}` });
+    console.error("❌ Webhook signature verification failed:", safeErr(err));
+    await logOrderMail({ siteKey: null, ownerEmail: null, sessionId: null,
+      eventType: "signature_error", sent: false, reason: `signature error: ${safeErr(err)}` });
     return new Response("OK", { status: 200 });
   }
 
@@ -408,8 +403,8 @@ export async function POST(req: NextRequest) {
     return new Response("OK", { status: 200 });
   }
 
-  const account = (event as any).account as string | undefined;
-  const reqOpts: Stripe.RequestOptions | undefined = account ? { stripeAccount: account } : undefined;
+  const connectedAccountId = (event as any).account as string | undefined;
+  const reqOpts: Stripe.RequestOptions | undefined = connectedAccountId ? { stripeAccount: connectedAccountId } : undefined;
 
   const session = event.data.object as Stripe.Checkout.Session & {
     metadata?: { siteKey?: string; lang?: string };
@@ -417,27 +412,41 @@ export async function POST(req: NextRequest) {
   };
 
   try {
-    /* A) PaymentIntent（決済手段/電話） */
-    const piId =
-      typeof session.payment_intent === "string"
-        ? session.payment_intent
-        : session.payment_intent?.id;
-    const pi = piId
-      ? await stripe.paymentIntents.retrieve(
-          piId,
-          { expand: ["latest_charge.payment_method_details", "latest_charge.billing_details"] },
-          reqOpts
-        )
-      : null;
+    /* ---------- A) PaymentIntent / 決済手段 & 電話番号 ---------- */
+    let pi: Stripe.PaymentIntent | null = null;
+    try {
+      pi = await stripe.paymentIntents.retrieve(
+        session.payment_intent as string,
+        { expand: ["latest_charge"] },
+        reqOpts
+      );
+    } catch (e) {
+      console.warn("⚠️ paymentIntents.retrieve failed:", safeErr(e));
+    }
+    const ch = pi?.latest_charge as Stripe.Charge | undefined;
+    const pm = ch?.payment_method_details;
+    const paymentType = pm?.type || null;
+    const cardBrand = pm?.card?.brand || null;
+    const last4 = pm?.card?.last4 || null;
 
-    const pm = extractPayment(pi);
-    const phone = resolvePhone(session, pi);
+    const phoneFallback =
+      session.customer_details?.phone ??
+      (session as any).shipping_details?.phone ??
+      ch?.billing_details?.phone ??
+      null;
 
-    /* B) 明細（"Item"回避 & 型エラー回避） */
+    /* ---------- B) 明細（必ず Stripe line_items 起点） ---------- */
     const buyerLang = normalizeLang(session.metadata?.lang || (session.locale as string) || "en");
-    const items = await buildResolvedItems(session, buyerLang, reqOpts);
+    let items: MailItem[] = [];
+    try {
+      items = await buildItemsFromStripe(session, reqOpts);
+    } catch (e) {
+      console.error("❌ listLineItems failed:", safeErr(e));
+      const totalMajor = toMajor(session.amount_total, session.currency);
+      items = [{ names: { default: "Item" }, qty: 1, unitAmount: totalMajor, subtotal: totalMajor }];
+    }
 
-    /* C) Firestore 保存（簡易） */
+    /* ---------- C) Firestore 保存 ---------- */
     await adminDb.collection("siteOrders").add({
       siteKey: session.metadata?.siteKey || null,
       createdAt: new Date(),
@@ -445,74 +454,88 @@ export async function POST(req: NextRequest) {
       amount: session.amount_total,
       currency: session.currency,
       payment_status: session.payment_status,
-      payment_type: pm.type || null,
-      card_brand: pm.brand || null,
-      card_last4: pm.last4 || null,
+      payment_type: paymentType,
+      card_brand: cardBrand,
+      card_last4: last4,
       customer: {
         email: session.customer_details?.email ?? null,
         name: session.customer_details?.name ?? (session as any).shipping_details?.name ?? null,
-        phone: phone ?? null,
+        phone: phoneFallback,
         address:
           session.customer_details?.address ??
           (session as any).shipping_details?.address ??
           null,
       },
-      items: items.map((i) => ({
-        name_buyer: i.buyerName,
-        name_owner_ja: i.ownerJaName,
+      items: items.map(i => ({
+        name: i.names.default,
         qty: i.qty,
-        unit_minor: i.unitMinor,
-        subtotal_minor: i.subtotalMinor,
+        unitAmount: i.unitAmount,
+        subtotal: i.subtotal,
       })),
       buyer_lang: buyerLang,
     });
 
-    /* D) オーナー宛（日本語固定） */
-    const siteKey = session.metadata?.siteKey || null;
+    /* ---------- D) siteKey 解決 & stripeCustomerId 保存 ---------- */
+    const customerId = (session.customer as string) || null;
+    const siteKey: string | null =
+      session.metadata?.siteKey
+      ?? (connectedAccountId ? await findSiteKeyByConnectAccount(connectedAccountId) : null)
+      ?? session.client_reference_id
+      ?? (customerId ? await findSiteKeyByCustomerId(customerId) : null);
+
+    if (siteKey && customerId) {
+      await adminDb.doc(`siteSettings/${siteKey}`).set({ stripeCustomerId: customerId }, { merge: true });
+    }
+
+    /* ---------- E) オーナー宛（日本語） ---------- */
     if (siteKey) {
-      const doc = await adminDb.doc(`siteSettings/${siteKey}`).get();
-      const ownerEmail = (doc.get("ownerEmail") as string | undefined) || undefined;
+      const ownerEmail = await getOwnerEmail(siteKey);
       if (ownerEmail) {
         const ownerHtml = buildOwnerHtmlJa(session, items);
         try {
           await sendMail({ to: ownerEmail, subject: "【注文通知】新しい注文が完了しました", html: ownerHtml });
           await logOrderMail({ siteKey, ownerEmail, sessionId: session.id, eventType: event.type, sent: true });
         } catch (e) {
+          console.error("❌ sendMail(owner) failed:", safeErr(e));
           await logOrderMail({
             siteKey, ownerEmail, sessionId: session.id, eventType: event.type, sent: false,
             reason: `sendMail(owner) failed: ${safeErr(e)}`,
           });
         }
       } else {
-        await logOrderMail({ siteKey, ownerEmail: null, sessionId: session.id, eventType: event.type, sent: false, reason: "ownerEmail not found" });
-      }
-    } else {
-      await logOrderMail({ siteKey: null, ownerEmail: null, sessionId: session.id, eventType: event.type, sent: false, reason: "siteKey unresolved" });
-    }
-
-    /* E) 購入者宛（選択言語） */
-    const buyerEmail = session.customer_details?.email || session.customer_email || null;
-    if (buyerEmail) {
-      const buyerMail = buildBuyerHtmlI18n(buyerLang, session, items);
-      try {
-        await sendMail({ to: buyerEmail, subject: buyerMail.subject, html: buyerMail.html });
-      } catch (e) {
         await logOrderMail({
-          siteKey: siteKey ?? null, ownerEmail: null, sessionId: session.id, eventType: "buyer_mail_failed",
-          sent: false, reason: safeErr(e)
+          siteKey, ownerEmail: null, sessionId: session.id, eventType: event.type, sent: false,
+          reason: `ownerEmail not found at siteSettings/${siteKey}`,
         });
       }
+    } else {
+      await logOrderMail({
+        siteKey: null, ownerEmail: null, sessionId: session.id, eventType: event.type, sent: false,
+        reason: "siteKey unresolved", extras: { connectedAccountId, customerId, metadata: session.metadata ?? null },
+      });
+    }
+
+    /* ---------- F) 購入者宛（多言語） ---------- */
+    try {
+      const buyerEmail = session.customer_details?.email || session.customer_email || null;
+      if (buyerEmail) {
+        const buyerMail = buildBuyerHtmlI18n(buyerLang, session, items);
+        await sendMail({ to: buyerEmail, subject: buyerMail.subject, html: buyerMail.html });
+      }
+    } catch (e) {
+      console.error("❌ sendMail(buyer) failed:", safeErr(e));
     }
 
     return new Response("OK", { status: 200 });
   } catch (err) {
+    console.error("🔥 webhook handler error:", safeErr(err));
     await logOrderMail({
       siteKey: session.metadata?.siteKey ?? null,
       ownerEmail: null,
       sessionId: session.id,
-      eventType: "handler_error",
+      eventType: event.type,
       sent: false,
-      reason: `handler error: ${safeErr(err)}`
+      reason: `handler error: ${safeErr(err)}`,
     });
     return new Response("OK", { status: 200 });
   }

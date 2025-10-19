@@ -1,8 +1,10 @@
-// app/api/stripe/webhook/route.ts（管理ウェブ側：要件版）
-// - オーナー宛メール：日本語固定
-// - 購入者宛メール：購入時に選択した言語（metadata.lang）で送信
-// - 金額表記：購入時の通貨（session.currency）で表記（小計/単価/合計すべて）
-// - 決済手段：PaymentIntent → latest_charge.payment_method_details から取得して保存
+// app/api/stripe/webhook/route.ts（管理ウェブ側：完全版）
+// 要件：
+//  - オーナー宛メール＝日本語固定
+//  - 購入者宛メール＝購入時選択言語（metadata.lang）
+//  - 金額表記＝購入通貨（session.currency）で統一（単価/小計/合計）
+//  - 決済手段＝PaymentIntent.latest_charge.payment_method_details から取得・保存
+//  - 失敗時も 200 応答（Stripe リトライ渋滞回避）＋ Firestore にログ
 
 import { stripe } from "@/lib/stripe";
 import { adminDb } from "@/lib/firebase-admin";
@@ -31,9 +33,12 @@ type ShippingDetails = {
 const ZERO_DEC = new Set([
   "bif","clp","djf","gnf","jpy","kmf","krw","mga","pyg","rwf","ugx","vnd","vuv","xaf","xof","xpf",
 ]);
+
+/** Stripe最小通貨単位→主要単位 */
 const toMajor = (n: number | null | undefined, cur?: string | null) =>
   ZERO_DEC.has((cur ?? "jpy").toLowerCase()) ? (n ?? 0) : (n ?? 0) / 100;
 
+/** 例外を安全に文字列化 */
 const safeErr = (e: unknown) => {
   try {
     if (!e) return "";
@@ -45,7 +50,7 @@ const safeErr = (e: unknown) => {
   }
 };
 
-// 通貨汎用フォーマッタ（購入通貨で表記）
+/** 通貨フォーマッタ（購入通貨で表記） */
 const fmtCur = (n: number, cur?: string, locale = "en") => {
   const c = (cur ?? "jpy").toUpperCase();
   const zero = ZERO_DEC.has(c.toLowerCase());
@@ -57,7 +62,7 @@ const fmtCur = (n: number, cur?: string, locale = "en") => {
   }).format(n);
 };
 
-// 言語キー → 推奨ロケール
+/** 言語キー→ロケール推奨 */
 const LOCALE_BY_LANG: Record<string, string> = {
   ja: "ja-JP",
   en: "en",
@@ -371,13 +376,13 @@ const buyerText: Record<LangKey, {
   },
 };
 
-/* -------------------- メールHTML（オーナー：日本語固定／購入通貨で表記） -------------------- */
+/* -------------------- メールHTML（オーナー：日本語固定／購入通貨） -------------------- */
 function buildOwnerHtmlJa(
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
-  items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }>,
-  locale = "ja-JP"
+  items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }>
 ) {
   const cur = (session.currency || "jpy").toUpperCase();
+  const locale = "ja-JP";
 
   const ship = (session as any).shipping_details as
     | { name?: string | null; phone?: string | null; address?: Stripe.Address | null }
@@ -395,25 +400,21 @@ function buildOwnerHtmlJa(
     addrObj?.line1,
     addrObj?.line2,
     addrObj?.country && addrObj.country !== "JP" ? addrObj.country : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  ].filter(Boolean).join(" ");
 
   const buyer = cust?.email || session.customer_email || "-";
   const total = toMajor(session.amount_total, session.currency);
 
-  const rows = items
-    .map((it) => {
-      const unit = it.unitAmount;
-      const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
-      return `<tr>
-        <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(unit, cur, locale)}</td>
-        <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(sub, cur, locale)}</td>
-      </tr>`;
-    })
-    .join("");
+  const rows = items.map((it) => {
+    const unit = it.unitAmount;
+    const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
+    return `<tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
+      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(unit, cur, locale)}</td>
+      <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
+      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(sub, cur, locale)}</td>
+    </tr>`;
+  }).join("");
 
   return `
   <div style="font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial;">
@@ -437,7 +438,7 @@ function buildOwnerHtmlJa(
   </div>`;
 }
 
-/* -------------------- メールHTML（購入者：多言語／購入通貨で表記） -------------------- */
+/* -------------------- メールHTML（購入者：多言語／購入通貨） -------------------- */
 function buildBuyerHtmlI18n(
   lang: LangKey,
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
@@ -462,26 +463,22 @@ function buildBuyerHtmlI18n(
     addrObj?.city,
     addrObj?.line1,
     addrObj?.line2,
-    addrObj?.country && addrObj.country !== "JP" ? addrObj.country : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+    addrObj?.country && addrObj?.country !== "JP" ? addrObj.country : "",
+  ].filter(Boolean).join(" ");
 
   const buyer = cust?.email || session.customer_email || "-";
   const total = toMajor(session.amount_total, session.currency);
 
-  const rows = items
-    .map((it) => {
-      const unit = it.unitAmount;
-      const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
-      return `<tr>
-        <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(unit, cur, locale)}</td>
-        <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(sub, cur, locale)}</td>
-      </tr>`;
-    })
-    .join("");
+  const rows = items.map((it) => {
+    const unit = it.unitAmount;
+    const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
+    return `<tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
+      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(unit, cur, locale)}</td>
+      <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
+      <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(sub, cur, locale)}</td>
+    </tr>`;
+  }).join("");
 
   return {
     subject: t.subject,
@@ -509,30 +506,33 @@ function buildBuyerHtmlI18n(
 }
 
 /* ============================================================
-   Webhook
+   Webhook 本体
 ============================================================ */
 export async function POST(req: NextRequest) {
-  const rawBody = await req.arrayBuffer();
+  // Stripeは「生のボディ」を要求。Next.js App Routerでは text() が安全
+  const body = await req.text();
   const sig = (await headers()).get("stripe-signature");
   if (!sig) return new Response("Missing stripe-signature header", { status: 400 });
 
   let event: Stripe.Event;
   try {
     event = stripe.webhooks.constructEvent(
-      Buffer.from(rawBody),
+      body, // ← text() をそのまま渡す
       sig,
       process.env.STRIPE_WEBHOOK_SECRET!
     );
   } catch (err) {
     console.error("❌ Webhook signature verification failed:", safeErr(err));
-    return new Response("Webhook Error", { status: 400 });
+    // 署名不一致は 400 を返す（Stripeが再送してくる）
+    return new Response("Webhook signature error", { status: 400 });
   }
 
-  const eventType = event.type;
+  const type = event.type;
   const connectedAccountId = (event as any).account as string | undefined;
   const reqOpts = connectedAccountId ? { stripeAccount: connectedAccountId } : undefined;
 
-  if (eventType !== "checkout.session.completed") {
+  if (type !== "checkout.session.completed") {
+    // 他イベントはスルー
     return new Response("OK", { status: 200 });
   }
 
@@ -541,37 +541,40 @@ export async function POST(req: NextRequest) {
     shipping_details?: ShippingDetails;
   };
 
+  // 常に200を返すためのエラーハンドリング枠
   try {
-    /* ---------- 0) 決済手段詳細の取得（保存用） ---------- */
-    const pi = await stripe.paymentIntents.retrieve(
-      session.payment_intent as string,
-      { expand: ["latest_charge.payment_method"], ...reqOpts }
-    );
-    const latestCharge = pi.latest_charge as Stripe.Charge | null;
+    /* ---------- A) PaymentIntent / 決済手段情報 ---------- */
+    let pi: Stripe.PaymentIntent | null = null;
+    try {
+      pi = await stripe.paymentIntents.retrieve(
+        session.payment_intent as string,
+        { expand: ["latest_charge.payment_method"], ...reqOpts }
+      );
+    } catch (e) {
+      console.warn("⚠️ paymentIntents.retrieve failed:", safeErr(e));
+    }
+    const latestCharge = pi?.latest_charge as Stripe.Charge | undefined;
     const pmDetails = latestCharge?.payment_method_details;
     const paymentType = pmDetails?.type || null; // 'card' | 'konbini' | 'paypal' など
     const cardBrand = pmDetails?.card?.brand || null;
     const last4 = pmDetails?.card?.last4 || null;
 
-    /* ---------- 1) Firestore 保存（電話番号も保存） ---------- */
-    const itemsFromMeta: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }> =
-      session.metadata?.items ? JSON.parse(session.metadata.items) : [];
+    /* ---------- B) 明細行の確定（metadata → 無ければStripeから取得） ---------- */
+    let items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }> = [];
+    try {
+      items = session.metadata?.items ? JSON.parse(session.metadata.items) : [];
+    } catch (e) {
+      console.warn("⚠️ metadata.items JSON.parse failed:", safeErr(e));
+    }
 
-    const customerPhone =
-      session.customer_details?.phone ??
-      (session as any).shipping_details?.phone ??
-      null;
-
-    // 明細が metadata にない場合は Stripe から取得（購入通貨で major 化）
-    let mailItems: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }> = itemsFromMeta;
-    if (!mailItems.length) {
+    if (!items.length) {
       try {
         const li = await stripe.checkout.sessions.listLineItems(
           session.id,
           { expand: ["data.price.product"], limit: 100 },
           reqOpts
         );
-        mailItems = li.data.map((x) => {
+        items = li.data.map((x) => {
           const name = (x.price?.product as Stripe.Product | undefined)?.name || x.description || "Item";
           const qty = x.quantity || 1;
           const subMajor = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
@@ -579,10 +582,16 @@ export async function POST(req: NextRequest) {
           return { name, qty, unitAmount: unitMajor, subtotal: subMajor };
         });
       } catch (e) {
-        console.warn("⚠️ listLineItems failed, fallback to minimal:", safeErr(e));
-        mailItems = [{ name: "Item", qty: 1, unitAmount: toMajor(session.amount_total, session.currency) }];
+        console.warn("⚠️ listLineItems failed:", safeErr(e));
+        items = [{ name: "Item", qty: 1, unitAmount: toMajor(session.amount_total, session.currency) }];
       }
     }
+
+    /* ---------- C) 購入記録保存 ---------- */
+    const customerPhone =
+      session.customer_details?.phone ??
+      (session as any).shipping_details?.phone ??
+      null;
 
     await adminDb.collection("siteOrders").add({
       siteKey: session.metadata?.siteKey || null,
@@ -603,10 +612,10 @@ export async function POST(req: NextRequest) {
           (session as any).shipping_details?.address ??
           null,
       },
-      items: mailItems,
+      items,
     });
 
-    /* ---------- 2) siteKey 解決 ---------- */
+    /* ---------- D) siteKey 解決 ---------- */
     const customerId = (session.customer as string) || null;
     const siteKey: string | null =
       session.metadata?.siteKey
@@ -614,73 +623,70 @@ export async function POST(req: NextRequest) {
       ?? session.client_reference_id
       ?? (customerId ? await findSiteKeyByCustomerId(customerId) : null);
 
-    if (!siteKey) {
+    // stripeCustomerId を保存（初回購入対策）
+    if (siteKey && customerId) {
+      await adminDb.doc(`siteSettings/${siteKey}`).set({ stripeCustomerId: customerId }, { merge: true });
+    }
+
+    /* ---------- E) オーナー宛（日本語固定） ---------- */
+    let ownerSendOk = false;
+    if (siteKey) {
+      const ownerEmail = await getOwnerEmail(siteKey);
+      if (ownerEmail) {
+        const ownerHtml = buildOwnerHtmlJa(session, items);
+        try {
+          await sendMail({
+            to: ownerEmail,
+            subject: "【注文通知】新しい注文が完了しました",
+            html: ownerHtml,
+          });
+          ownerSendOk = true;
+          await logOrderMail({
+            siteKey,
+            ownerEmail,
+            sessionId: session.id,
+            eventType: type,
+            sent: true,
+          });
+        } catch (e) {
+          console.error("❌ sendMail(owner) failed:", safeErr(e));
+          await logOrderMail({
+            siteKey,
+            ownerEmail,
+            sessionId: session.id,
+            eventType: type,
+            sent: false,
+            reason: `sendMail(owner) failed: ${safeErr(e)}`,
+          });
+        }
+      } else {
+        await logOrderMail({
+          siteKey,
+          ownerEmail: null,
+          sessionId: session.id,
+          eventType: type,
+          sent: false,
+          reason: `ownerEmail not found at siteSettings/${siteKey}`,
+        });
+      }
+    } else {
       await logOrderMail({
         siteKey: null,
         ownerEmail: null,
         sessionId: session.id,
-        eventType,
+        eventType: type,
         sent: false,
         reason: "siteKey unresolved",
         extras: { connectedAccountId, customerId, metadata: session.metadata ?? null },
       });
-      return new Response("Order saved (no siteKey for mail)", { status: 200 });
     }
 
-    // 初回購入で未保存なら stripeCustomerId を保存
-    if (customerId) {
-      await adminDb.doc(`siteSettings/${siteKey}`).set({ stripeCustomerId: customerId }, { merge: true });
-    }
-
-    /* ---------- 3) ownerEmail 取得 ---------- */
-    const ownerEmail = await getOwnerEmail(siteKey);
-    if (!ownerEmail) {
-      await logOrderMail({
-        siteKey,
-        ownerEmail: null,
-        sessionId: session.id,
-        eventType,
-        sent: false,
-        reason: `ownerEmail not found at siteSettings/${siteKey}`,
-      });
-      return new Response("Order saved (no ownerEmail)", { status: 200 });
-    }
-
-    /* ---------- 4) 送信：オーナー（日本語固定／購入通貨表記） ---------- */
-    const ownerHtml = buildOwnerHtmlJa(session, mailItems, "ja-JP");
+    /* ---------- F) 購入者宛（metadata.lang 優先） ---------- */
     try {
-      await sendMail({
-        to: ownerEmail,
-        subject: "【注文通知】新しい注文が完了しました",
-        html: ownerHtml,
-      });
-      await logOrderMail({
-        siteKey,
-        ownerEmail,
-        sessionId: session.id,
-        eventType,
-        sent: true,
-      });
-    } catch (e) {
-      console.error("❌ sendMail (owner) failed:", safeErr(e));
-      await logOrderMail({
-        siteKey,
-        ownerEmail,
-        sessionId: session.id,
-        eventType,
-        sent: false,
-        reason: `sendMail(owner) failed: ${safeErr(e)}`,
-      });
-    }
-
-    /* ---------- 5) 送信：購入者（metadata.lang 優先／購入通貨表記） ---------- */
-    try {
-      const buyerEmail =
-        session.customer_details?.email || session.customer_email || null;
+      const buyerEmail = session.customer_details?.email || session.customer_email || null;
       if (buyerEmail) {
-        // 言語優先度: metadata.lang → session.locale → 'en'
         const resolvedLang = normalizeLang(session.metadata?.lang || (session.locale as string) || "en");
-        const buyerMail = buildBuyerHtmlI18n(resolvedLang, session, mailItems);
+        const buyerMail = buildBuyerHtmlI18n(resolvedLang, session, items);
         await sendMail({
           to: buyerEmail,
           subject: buyerMail.subject,
@@ -688,21 +694,15 @@ export async function POST(req: NextRequest) {
         });
       }
     } catch (e) {
-      console.error("❌ sendMail (buyer) failed:", safeErr(e));
-      // 続行
+      console.error("❌ sendMail(buyer) failed:", safeErr(e));
+      // 続行（オーナー送信だけでも成功させる）
     }
 
-    return new Response("Order saved & mail handled", { status: 200 });
+    // ここまで来たら Stripe には常に 200 を返す
+    return new Response(ownerSendOk ? "OK" : "OK (mail partial)", { status: 200 });
   } catch (err) {
     console.error("🔥 webhook handler error:", safeErr(err));
-    await logOrderMail({
-      siteKey: session.metadata?.siteKey ?? null,
-      ownerEmail: null,
-      sessionId: session.id,
-      eventType,
-      sent: false,
-      reason: `handler error: ${safeErr(err)}`,
-    });
-    return new Response("Internal Server Error", { status: 500 });
+    // Stripe の再送ループを避けるため 200 を返す（失敗は Firestore にログ済み）
+    return new Response("OK (handled with errors)", { status: 200 });
   }
 }

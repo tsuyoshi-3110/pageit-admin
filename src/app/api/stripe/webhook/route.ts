@@ -40,6 +40,8 @@ const safeErr = (e: unknown) => {
   }
 };
 
+const fmtJPY = (n: number) => `¥${Math.round(n).toLocaleString()}`;
+
 /* -------------------- Firestore helpers -------------------- */
 async function findSiteKeyByCustomerId(customerId: string): Promise<string | null> {
   const snap = await adminDb
@@ -81,21 +83,274 @@ async function logOrderMail(rec: {
   });
 }
 
-/* -------------------- メールHTML -------------------- */
-function buildOrderHtmlFromItems(
+/* -------------------- 言語判定 -------------------- */
+type LangKey =
+  | "ja" | "en" | "fr" | "es" | "de" | "it" | "pt" | "pt-BR" | "ko"
+  | "zh" | "zh-TW" | "ru" | "th" | "vi" | "id";
+
+function normalizeLang(input?: string | null): LangKey {
+  const v = (input || "").toLowerCase();
+  if (!v) return "en";
+  if (v.startsWith("ja")) return "ja";
+  if (v.startsWith("en")) return "en";
+  if (v.startsWith("fr")) return "fr";
+  if (v.startsWith("es-419")) return "es"; // まとめて es
+  if (v.startsWith("es")) return "es";
+  if (v.startsWith("de")) return "de";
+  if (v.startsWith("it")) return "it";
+  if (v.startsWith("pt-br")) return "pt-BR";
+  if (v.startsWith("pt")) return "pt";
+  if (v.startsWith("ko")) return "ko";
+  if (v.startsWith("zh-tw")) return "zh-TW";
+  if (v.startsWith("zh")) return "zh";
+  if (v.startsWith("ru")) return "ru";
+  if (v.startsWith("th")) return "th";
+  if (v.startsWith("vi")) return "vi";
+  if (v.startsWith("id")) return "id";
+  return "en";
+}
+
+/* -------------------- 購入者向け 多言語テキスト -------------------- */
+const buyerText: Record<LangKey, {
+  subject: string;
+  heading: string;
+  orderId: string;
+  payment: string;
+  buyer: string;
+  table: { name: string; unit: string; qty: string; subtotal: string; };
+  total: (amount: number, cur: string) => string;
+  shipTo: string;
+  name: string;
+  phone: string;
+  address: string;
+  footer: string;
+}> = {
+  ja: {
+    subject: "ご購入ありがとうございます（ご注文のレシート）",
+    heading: "ご注文ありがとうございます",
+    orderId: "注文ID",
+    payment: "支払い",
+    buyer: "購入者",
+    table: { name: "商品名", unit: "単価（税込）", qty: "数量", subtotal: "小計" },
+    total: (a, c) => `合計: ${fmtJPY(a)}（${c.toUpperCase()}）`,
+    shipTo: "お届け先",
+    name: "氏名",
+    phone: "電話",
+    address: "住所",
+    footer: "このメールは Stripe Webhook により自動送信されています。",
+  },
+  en: {
+    subject: "Thanks for your purchase (receipt)",
+    heading: "Thank you for your order",
+    orderId: "Order ID",
+    payment: "Payment",
+    buyer: "Buyer",
+    table: { name: "Item", unit: "Unit price (tax incl.)", qty: "Qty", subtotal: "Subtotal" },
+    total: (a, c) => `Total: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "Shipping address",
+    name: "Name",
+    phone: "Phone",
+    address: "Address",
+    footer: "This email was sent automatically by Stripe Webhook.",
+  },
+  fr: {
+    subject: "Merci pour votre achat (reçu)",
+    heading: "Merci pour votre commande",
+    orderId: "ID de commande",
+    payment: "Paiement",
+    buyer: "Acheteur",
+    table: { name: "Article", unit: "Prix unitaire (TTC)", qty: "Qté", subtotal: "Sous-total" },
+    total: (a, c) => `Total : ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "Adresse de livraison",
+    name: "Nom",
+    phone: "Téléphone",
+    address: "Adresse",
+    footer: "Cet e-mail a été envoyé automatiquement par Stripe Webhook.",
+  },
+  es: {
+    subject: "Gracias por su compra (recibo)",
+    heading: "Gracias por su pedido",
+    orderId: "ID de pedido",
+    payment: "Pago",
+    buyer: "Comprador",
+    table: { name: "Producto", unit: "Precio unitario (IVA incl.)", qty: "Cant.", subtotal: "Subtotal" },
+    total: (a, c) => `Total: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "Dirección de envío",
+    name: "Nombre",
+    phone: "Teléfono",
+    address: "Dirección",
+    footer: "Este correo fue enviado automáticamente por Stripe Webhook.",
+  },
+  de: {
+    subject: "Vielen Dank für Ihren Einkauf (Beleg)",
+    heading: "Danke für Ihre Bestellung",
+    orderId: "Bestell-ID",
+    payment: "Zahlung",
+    buyer: "Käufer",
+    table: { name: "Artikel", unit: "Einzelpreis (inkl. MwSt.)", qty: "Menge", subtotal: "Zwischensumme" },
+    total: (a, c) => `Gesamt: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "Lieferadresse",
+    name: "Name",
+    phone: "Telefon",
+    address: "Adresse",
+    footer: "Diese E-Mail wurde automatisch vom Stripe Webhook gesendet.",
+  },
+  it: {
+    subject: "Grazie per l'acquisto (ricevuta)",
+    heading: "Grazie per il tuo ordine",
+    orderId: "ID ordine",
+    payment: "Pagamento",
+    buyer: "Acquirente",
+    table: { name: "Articolo", unit: "Prezzo unitario (IVA incl.)", qty: "Qtà", subtotal: "Subtotale" },
+    total: (a, c) => `Totale: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "Indirizzo di spedizione",
+    name: "Nome",
+    phone: "Telefono",
+    address: "Indirizzo",
+    footer: "Questa e-mail è stata inviata automaticamente dal webhook di Stripe.",
+  },
+  pt: {
+    subject: "Obrigado pela compra (recibo)",
+    heading: "Obrigado pelo seu pedido",
+    orderId: "ID do pedido",
+    payment: "Pagamento",
+    buyer: "Comprador",
+    table: { name: "Item", unit: "Preço unit. (c/ imposto)", qty: "Qtd", subtotal: "Subtotal" },
+    total: (a, c) => `Total: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "Endereço de entrega",
+    name: "Nome",
+    phone: "Telefone",
+    address: "Endereço",
+    footer: "Este e-mail foi enviado automaticamente pelo Stripe Webhook.",
+  },
+  "pt-BR": {
+    subject: "Obrigado pela compra (recibo)",
+    heading: "Obrigado pelo seu pedido",
+    orderId: "ID do pedido",
+    payment: "Pagamento",
+    buyer: "Comprador",
+    table: { name: "Item", unit: "Preço unit. (c/ imposto)", qty: "Qtd", subtotal: "Subtotal" },
+    total: (a, c) => `Total: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "Endereço de entrega",
+    name: "Nome",
+    phone: "Telefone",
+    address: "Endereço",
+    footer: "Este e-mail foi enviado automaticamente pelo Stripe Webhook.",
+  },
+  ko: {
+    subject: "구매해 주셔서 감사합니다 (영수증)",
+    heading: "주문해 주셔서 감사합니다",
+    orderId: "주문 ID",
+    payment: "결제",
+    buyer: "구매자",
+    table: { name: "상품명", unit: "단가(세금 포함)", qty: "수량", subtotal: "소계" },
+    total: (a, c) => `합계: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "배송지",
+    name: "이름",
+    phone: "전화",
+    address: "주소",
+    footer: "이 메일은 Stripe Webhook에 의해 자동 전송되었습니다.",
+  },
+  zh: {
+    subject: "感谢您的购买（收据）",
+    heading: "感谢您的订单",
+    orderId: "订单编号",
+    payment: "支付",
+    buyer: "购买者",
+    table: { name: "商品名称", unit: "单价（含税）", qty: "数量", subtotal: "小计" },
+    total: (a, c) => `合计：${fmtJPY(a)}（${c.toUpperCase()}）`,
+    shipTo: "收货地址",
+    name: "姓名",
+    phone: "电话",
+    address: "地址",
+    footer: "此邮件由 Stripe Webhook 自动发送。",
+  },
+  "zh-TW": {
+    subject: "感謝您的購買（收據）",
+    heading: "感謝您的訂單",
+    orderId: "訂單編號",
+    payment: "付款",
+    buyer: "購買者",
+    table: { name: "商品名稱", unit: "單價（含稅）", qty: "數量", subtotal: "小計" },
+    total: (a, c) => `合計：${fmtJPY(a)}（${c.toUpperCase()}）`,
+    shipTo: "收件地址",
+    name: "姓名",
+    phone: "電話",
+    address: "地址",
+    footer: "此郵件由 Stripe Webhook 自動發送。",
+  },
+  ru: {
+    subject: "Спасибо за покупку (квитанция)",
+    heading: "Спасибо за ваш заказ",
+    orderId: "ID заказа",
+    payment: "Оплата",
+    buyer: "Покупатель",
+    table: { name: "Товар", unit: "Цена (с налогом)", qty: "Кол-во", subtotal: "Промежуточный итог" },
+    total: (a, c) => `Итого: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "Адрес доставки",
+    name: "Имя",
+    phone: "Телефон",
+    address: "Адрес",
+    footer: "Это письмо отправлено автоматически через Stripe Webhook.",
+  },
+  th: {
+    subject: "ขอบคุณสำหรับการสั่งซื้อ (ใบเสร็จ)",
+    heading: "ขอบคุณสำหรับคำสั่งซื้อ",
+    orderId: "รหัสคำสั่งซื้อ",
+    payment: "การชำระเงิน",
+    buyer: "ผู้ซื้อ",
+    table: { name: "สินค้า", unit: "ราคาต่อหน่วย (รวมภาษี)", qty: "จำนวน", subtotal: "ยอดย่อย" },
+    total: (a, c) => `ยอดรวม: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "ที่อยู่จัดส่ง",
+    name: "ชื่อ",
+    phone: "โทร",
+    address: "ที่อยู่",
+    footer: "อีเมลนี้ถูกส่งโดยอัตโนมัติจาก Stripe Webhook",
+  },
+  vi: {
+    subject: "Cảm ơn bạn đã mua hàng (biên nhận)",
+    heading: "Cảm ơn bạn đã đặt hàng",
+    orderId: "Mã đơn hàng",
+    payment: "Thanh toán",
+    buyer: "Người mua",
+    table: { name: "Sản phẩm", unit: "Đơn giá (đã gồm thuế)", qty: "SL", subtotal: "Tạm tính" },
+    total: (a, c) => `Tổng: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "Địa chỉ giao hàng",
+    name: "Tên",
+    phone: "Điện thoại",
+    address: "Địa chỉ",
+    footer: "Email này được gửi tự động bởi Stripe Webhook.",
+  },
+  id: {
+    subject: "Terima kasih atas pembelian Anda (kwitansi)",
+    heading: "Terima kasih atas pesanan Anda",
+    orderId: "ID Pesanan",
+    payment: "Pembayaran",
+    buyer: "Pembeli",
+    table: { name: "Produk", unit: "Harga satuan (termasuk pajak)", qty: "Jml", subtotal: "Subtotal" },
+    total: (a, c) => `Total: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    shipTo: "Alamat pengiriman",
+    name: "Nama",
+    phone: "Telepon",
+    address: "Alamat",
+    footer: "Email ini dikirim otomatis oleh Stripe Webhook.",
+  },
+};
+
+/* -------------------- メールHTML（オーナー：日本語固定） -------------------- */
+function buildOwnerHtmlJa(
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
   items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }>
 ) {
   const cur = (session.currency || "jpy").toUpperCase();
 
-  // shipping_details が無い環境でも customer_details をフォールバックで使う
   const ship = (session as any).shipping_details as
     | { name?: string | null; phone?: string | null; address?: Stripe.Address | null }
     | undefined;
   const cust = session.customer_details;
 
   const name = ship?.name ?? cust?.name ?? "-";
-  const phone = cust?.phone ?? ship?.phone ?? "-"; // ← 電話は customer_details を優先
+  const phone = cust?.phone ?? ship?.phone ?? "-";
   const addrObj: Stripe.Address | undefined = ship?.address ?? cust?.address ?? undefined;
 
   const addr = [
@@ -118,9 +373,9 @@ function buildOrderHtmlFromItems(
       const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
       return `<tr>
         <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(unit).toLocaleString()}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtJPY(unit)}</td>
         <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">¥${Math.round(sub).toLocaleString()}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtJPY(sub)}</td>
       </tr>`;
     })
     .join("");
@@ -139,12 +394,82 @@ function buildOrderHtmlFromItems(
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p style="margin-top:12px;">合計: <b>¥${Math.round(total).toLocaleString()}</b> (${cur})</p>
+    <p style="margin-top:12px;">合計: <b>${fmtJPY(total)}</b> (${cur})</p>
     <h3>お届け先</h3>
     <p>氏名：${name}<br/>電話：${phone}<br/>住所：${addr || "-"}</p>
     <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
     <p style="color:#666;font-size:12px;">このメールは Stripe Webhook により自動送信されています。</p>
   </div>`;
+}
+
+/* -------------------- メールHTML（購入者：多言語） -------------------- */
+function buildBuyerHtmlI18n(
+  lang: LangKey,
+  session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
+  items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }>
+) {
+  const t = buyerText[lang] || buyerText.en;
+  const cur = (session.currency || "jpy").toUpperCase();
+
+  const ship = (session as any).shipping_details as
+    | { name?: string | null; phone?: string | null; address?: Stripe.Address | null }
+    | undefined;
+  const cust = session.customer_details;
+
+  const name = ship?.name ?? cust?.name ?? "-";
+  const phone = cust?.phone ?? ship?.phone ?? "-";
+  const addrObj: Stripe.Address | undefined = ship?.address ?? cust?.address ?? undefined;
+
+  const addr = [
+    addrObj?.postal_code,
+    addrObj?.state,
+    addrObj?.city,
+    addrObj?.line1,
+    addrObj?.line2,
+    addrObj?.country && addrObj.country !== "JP" ? addrObj.country : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const buyer = cust?.email || session.customer_email || "-";
+  const total = toMajor(session.amount_total, session.currency);
+
+  const rows = items
+    .map((it) => {
+      const unit = it.unitAmount;
+      const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
+      return `<tr>
+        <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtJPY(unit)}</td>
+        <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtJPY(sub)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  return {
+    subject: t.subject,
+    html: `
+    <div style="font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial;">
+      <h2>${t.heading}</h2>
+      <p>${t.orderId}: <b>${session.id}</b> / ${t.payment}: <b>${session.payment_status}</b></p>
+      <p>${t.buyer}: <b>${buyer}</b></p>
+      <table style="border-collapse:collapse;width:100%;max-width:680px;">
+        <thead><tr>
+          <th style="text-align:left;border-bottom:2px solid #333;">${t.table.name}</th>
+          <th style="text-align:right;border-bottom:2px solid #333;">${t.table.unit}</th>
+          <th style="text-align:center;border-bottom:2px solid #333;">${t.table.qty}</th>
+          <th style="text-align:right;border-bottom:2px solid #333;">${t.table.subtotal}</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p style="margin-top:12px;"><b>${t.total(total, cur)}</b></p>
+      <h3>${t.shipTo}</h3>
+      <p>${t.name}: ${name}<br/>${t.phone}: ${phone}<br/>${t.address}: ${addr || "-"}</p>
+      <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
+      <p style="color:#666;font-size:12px;">${t.footer}</p>
+    </div>`,
+  };
 }
 
 /* ============================================================
@@ -176,16 +501,15 @@ export async function POST(req: NextRequest) {
   }
 
   const session = event.data.object as Stripe.Checkout.Session & {
-    metadata?: { siteKey?: string; items?: string };
+    metadata?: { siteKey?: string; items?: string; uiLang?: string };
     shipping_details?: ShippingDetails;
   };
 
   try {
     /* ---------- 1) Firestore 保存（電話番号も保存） ---------- */
-    const itemsFromMeta: Array<{ name: string; qty: number; unitAmount: number }> =
+    const itemsFromMeta: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }> =
       session.metadata?.items ? JSON.parse(session.metadata.items) : [];
 
-    // 電話番号は customer_details.phone を優先、無ければ shipping_details.phone
     const customerPhone =
       session.customer_details?.phone ??
       (session as any).shipping_details?.phone ??
@@ -201,7 +525,7 @@ export async function POST(req: NextRequest) {
       customer: {
         email: session.customer_details?.email ?? null,
         name: session.customer_details?.name ?? (session as any).shipping_details?.name ?? null,
-        phone: customerPhone, // ← 追加保存
+        phone: customerPhone,
         address:
           session.customer_details?.address ??
           (session as any).shipping_details?.address ??
@@ -217,17 +541,6 @@ export async function POST(req: NextRequest) {
       ?? (connectedAccountId ? await findSiteKeyByConnectAccount(connectedAccountId) : null)
       ?? session.client_reference_id
       ?? (customerId ? await findSiteKeyByCustomerId(customerId) : null);
-
-    console.log("🔎 order resolve", {
-      sessionId: session.id,
-      siteKey,
-      connectedAccountId,
-      hasCustomer: !!customerId,
-      hasMetaItems: itemsFromMeta.length > 0,
-      hasShipping: !!(session as any).shipping_details,
-      hasCustomerAddress: !!session.customer_details?.address,
-      hasPhone: !!customerPhone,
-    });
 
     if (!siteKey) {
       await logOrderMail({
@@ -261,7 +574,7 @@ export async function POST(req: NextRequest) {
       return new Response("Order saved (no ownerEmail)", { status: 200 });
     }
 
-    /* ---------- 4) メール items 準備（metadata 優先、なければ Stripe から取得） ---------- */
+    /* ---------- 4) メール items 準備 ---------- */
     let mailItems: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }> = itemsFromMeta;
 
     if (!mailItems.length) {
@@ -271,12 +584,14 @@ export async function POST(req: NextRequest) {
           { expand: ["data.price.product"], limit: 100 },
           reqOpts
         );
+        // Stripe側の通貨→合計には使うが、行は JPY 固定で表示したい運用ならここでは触らない
         mailItems = li.data.map((x) => {
           const name = (x.price?.product as Stripe.Product | undefined)?.name || x.description || "商品";
           const qty = x.quantity || 1;
-          const subtotal = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
-          const unit = subtotal / Math.max(1, qty);
-          return { name, qty, unitAmount: unit, subtotal };
+          const subtotalMajor = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
+          const unit = subtotalMajor / Math.max(1, qty);
+          // 行の JPY 表示が不要なら unit/subtotal を Stripe通貨で出す運用に変更可能
+          return { name, qty, unitAmount: unit, subtotal: subtotalMajor };
         });
       } catch (e) {
         console.warn("⚠️ listLineItems failed, fallback to minimal:", safeErr(e));
@@ -284,17 +599,14 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const html = buildOrderHtmlFromItems(session, mailItems);
-
-    /* ---------- 5) 送信 ---------- */
+    /* ---------- 5) 送信：オーナー（日本語固定） ---------- */
+    const ownerHtml = buildOwnerHtmlJa(session, mailItems);
     try {
       await sendMail({
         to: ownerEmail,
         subject: "【注文通知】新しい注文が完了しました",
-        html,
-        // replyTo: session.customer_details?.email || undefined,
+        html: ownerHtml,
       });
-      console.log("📧 order email sent to", ownerEmail);
       await logOrderMail({
         siteKey,
         ownerEmail,
@@ -303,36 +615,35 @@ export async function POST(req: NextRequest) {
         sent: true,
       });
     } catch (e) {
-      console.error("❌ sendMail failed:", safeErr(e));
+      console.error("❌ sendMail (owner) failed:", safeErr(e));
       await logOrderMail({
         siteKey,
         ownerEmail,
         sessionId: session.id,
         eventType,
         sent: false,
-        reason: `sendMail failed: ${safeErr(e)}`,
+        reason: `sendMail(owner) failed: ${safeErr(e)}`,
       });
     }
 
-    /* ---------- ★追加：購入者（消費者）にもレシート送信 ---------- */
+    /* ---------- 6) 送信：購入者（多言語） ---------- */
     try {
       const buyerEmail =
         session.customer_details?.email || session.customer_email || null;
       if (buyerEmail) {
+        // 言語優先度: metadata.uiLang → session.locale → en
+        const resolvedLang = normalizeLang(session.metadata?.uiLang || (session.locale as string) || "en");
+        const buyerMail = buildBuyerHtmlI18n(resolvedLang, session, mailItems);
         await sendMail({
           to: buyerEmail,
-          subject: "ご購入ありがとうございます（ご注文のレシート）",
-          html, // 上で生成したレシートHTMLをそのまま利用
+          subject: buyerMail.subject,
+          html: buyerMail.html,
         });
-        console.log("📧 receipt email sent to buyer", buyerEmail);
-      } else {
-        console.log("ℹ️ buyer email not found; receipt skipped");
       }
     } catch (e) {
-      console.error("❌ sendMail to buyer failed:", safeErr(e));
-      // 他の処理は継続
+      console.error("❌ sendMail (buyer) failed:", safeErr(e));
+      // 続行
     }
-    /* ---------- ★ここまで追加 ---------- */
 
     return new Response("Order saved & mail handled", { status: 200 });
   } catch (err) {

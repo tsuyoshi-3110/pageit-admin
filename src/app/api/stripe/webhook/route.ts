@@ -1,542 +1,409 @@
-// 要件：
-//  - オーナー宛メール＝日本語固定（見出し/表ヘッダは日本語）
-//  - 購入者宛メール＝購入時選択言語（metadata.lang、なければ session.locale）
-//  - 金額表記＝購入通貨（session.currency）で統一（単価/小計＝line_items、合計＝session.amount_total）
-//  - 決済手段＝PaymentIntent.latest_charge.payment_method_details から取得・保存
-//  - 電話番号＝customer_details.phone → shipping_details.phone → latest_charge.billing_details.phone
-//  - 失敗時も 200 応答＋ Firestore にログ
-
-import { stripe } from "@/lib/stripe";
+// app/api/stripe/webhook/route.ts
+import { NextRequest } from "next/server";
+import { headers } from "next/headers";
+import Stripe from "stripe";
+import { stripe } from "@/lib/stripe"; // プラットフォーム鍵
 import { adminDb } from "@/lib/firebase-admin";
 import { sendMail } from "@/lib/mailer";
-import { headers } from "next/headers";
-import { NextRequest } from "next/server";
-import Stripe from "stripe";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* -------------------- 型・ユーティリティ -------------------- */
-type ShippingDetails = {
-  address?: {
-    city?: string | null;
-    country?: string | null;
-    line1?: string | null;
-    line2?: string | null;
-    postal_code?: string | null;
-    state?: string | null;
-  } | null;
-  name?: string | null;
-  phone?: string | null;
-};
-
+/* ========================= 通貨桁＆表記 ========================= */
 const ZERO_DEC = new Set([
-  "bif","clp","djf","gnf","jpy","kmf","krw","mga","pyg","rwf","ugx","vnd","vuv","xaf","xof","xpf",
+  "bif","clp","djf","gnf","jpy","kmf","krw","mga","pyg","rwf","ugx","vnd","vuv","xaf","xof","xpf"
 ]);
-const toMajor = (n: number | null | undefined, cur?: string | null) =>
-  ZERO_DEC.has((cur ?? "jpy").toLowerCase()) ? (n ?? 0) : (n ?? 0) / 100;
-
-const safeErr = (e: unknown) => {
-  try {
-    if (!e) return "";
-    if (typeof e === "string") return e;
-    if (e instanceof Error) return `${e.name}: ${e.message}`;
-    return JSON.stringify(e);
-  } catch { return String(e); }
+const THREE_DEC = new Set(["bhd","iqd","jod","kwd","lyd","omr","tnd"]);
+const decimalsOf = (c?: string | null) => {
+  const x = (c || "").toLowerCase();
+  if (ZERO_DEC.has(x)) return 0;
+  if (THREE_DEC.has(x)) return 3;
+  return 2;
+};
+const formatMoney = (currency: string, minor: number) => {
+  const d = decimalsOf(currency);
+  const major = minor / Math.pow(10, d);
+  return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(major);
 };
 
-const fmtCur = (n: number, cur?: string, locale = "en") => {
-  const c = (cur ?? "jpy").toUpperCase();
-  const zero = ZERO_DEC.has(c.toLowerCase());
-  return new Intl.NumberFormat(locale, {
-    style: "currency",
-    currency: c,
-    maximumFractionDigits: zero ? 0 : 2,
-    minimumFractionDigits: zero ? 0 : 2,
-  }).format(n);
-};
-
-const LOCALE_BY_LANG: Record<string, string> = {
-  ja: "ja-JP", en: "en", fr: "fr-FR", es: "es-ES", de: "de-DE", it: "it-IT",
-  pt: "pt-PT", "pt-BR": "pt-BR", ko: "ko-KR", zh: "zh-CN", "zh-TW": "zh-TW",
-  ru: "ru-RU", th: "th-TH", vi: "vi-VN", id: "id-ID",
-};
-
-/* -------------------- Firestore helpers -------------------- */
-async function findSiteKeyByCustomerId(customerId: string): Promise<string | null> {
-  const snap = await adminDb.collection("siteSettings")
-    .where("stripeCustomerId", "==", customerId).limit(1).get();
-  return snap.empty ? null : snap.docs[0].id;
-}
-async function findSiteKeyByConnectAccount(connectAccountId: string): Promise<string | null> {
-  const snap = await adminDb.collection("siteSellers")
-    .where("stripe.connectAccountId", "==", connectAccountId).limit(1).get();
-  return snap.empty ? null : snap.docs[0].id;
-}
-async function getOwnerEmail(siteKey: string): Promise<string | null> {
-  const doc = await adminDb.doc(`siteSettings/${siteKey}`).get();
-  const email = doc.get("ownerEmail");
-  return typeof email === "string" ? email : null;
-}
-async function logOrderMail(rec: {
-  siteKey: string | null;
-  ownerEmail: string | null;
-  sessionId: string | null;
-  eventType: string;
-  sent: boolean;
-  reason?: string | null;
-  extras?: Record<string, unknown>;
-}) {
-  const { FieldValue } = await import("firebase-admin/firestore");
-  await adminDb.collection("orderMails").add({ ...rec, createdAt: FieldValue.serverTimestamp() });
-}
-
-/* -------------------- 言語 -------------------- */
-type LangKey =
-  | "ja" | "en" | "fr" | "es" | "de" | "it" | "pt" | "pt-BR" | "ko"
-  | "zh" | "zh-TW" | "ru" | "th" | "vi" | "id";
-function normalizeLang(input?: string | null): LangKey {
-  const v = (input || "").toLowerCase();
-  if (!v) return "en";
-  if (v.startsWith("ja")) return "ja";
-  if (v.startsWith("en")) return "en";
-  if (v.startsWith("fr")) return "fr";
-  if (v.startsWith("es-419") || v.startsWith("es")) return "es";
-  if (v.startsWith("de")) return "de";
-  if (v.startsWith("it")) return "it";
-  if (v.startsWith("pt-br")) return "pt-BR";
-  if (v.startsWith("pt")) return "pt";
-  if (v.startsWith("ko")) return "ko";
-  if (v.startsWith("zh-tw")) return "zh-TW";
-  if (v.startsWith("zh")) return "zh";
-  if (v.startsWith("ru")) return "ru";
-  if (v.startsWith("th")) return "th";
-  if (v.startsWith("vi")) return "vi";
-  if (v.startsWith("id")) return "id";
+/* ========================= 言語判定 ========================= */
+type LangKey = "ja" | "en" | "zh" | "zh-TW" | "ko" | "fr" | "es";
+const SUPPORTED: LangKey[] = ["ja","en","zh","zh-TW","ko","fr","es"];
+const resolveBuyerLang = (s: Stripe.Checkout.Session): LangKey => {
+  const metaLang = (s.metadata?.lang as string | undefined) || undefined;
+  if (metaLang && (SUPPORTED as string[]).includes(metaLang)) return metaLang as LangKey;
+  const loc = (s.locale || "").toString();
+  if ((SUPPORTED as string[]).includes(loc)) return loc as LangKey;
   return "en";
-}
-
-/* -------------------- i18n 文言 -------------------- */
-const buyerText: Record<LangKey, {
-  subject: string; heading: string; orderId: string; payment: string; buyer: string;
-  table: { name: string; unit: string; qty: string; subtotal: string; };
-  total: string; shipTo: string; name: string; phone: string; address: string; footer: string;
-}> = {
-  ja: { subject:"ご購入ありがとうございます（レシート）", heading:"ご注文ありがとうございます",
-    orderId:"注文ID", payment:"支払い", buyer:"購入者",
-    table:{ name:"商品名", unit:"単価", qty:"数量", subtotal:"小計" },
-    total:"合計", shipTo:"お届け先", name:"氏名", phone:"電話", address:"住所",
-    footer:"このメールは Stripe Webhook により自動送信されています。" },
-  en: { subject:"Thanks for your purchase (receipt)", heading:"Thank you for your order",
-    orderId:"Order ID", payment:"Payment", buyer:"Buyer",
-    table:{ name:"Item", unit:"Unit price", qty:"Qty", subtotal:"Subtotal" },
-    total:"Total", shipTo:"Shipping address", name:"Name", phone:"Phone", address:"Address",
-    footer:"This email was sent automatically by Stripe Webhook." },
-  fr:{subject:"Merci pour votre achat (reçu)",heading:"Merci pour votre commande",
-    orderId:"ID de commande",payment:"Paiement",buyer:"Acheteur",
-    table:{name:"Article",unit:"Prix unitaire",qty:"Qté",subtotal:"Sous-total"},
-    total:"Total",shipTo:"Adresse de livraison",name:"Nom",phone:"Téléphone",address:"Adresse",
-    footer:"Cet e-mail a été envoyé automatiquement par Stripe Webhook."},
-  es:{subject:"Gracias por su compra (recibo)",heading:"Gracias por su pedido",
-    orderId:"ID de pedido",payment:"Pago",buyer:"Comprador",
-    table:{name:"Producto",unit:"Precio unitario",qty:"Cant.",subtotal:"Subtotal"},
-    total:"Total",shipTo:"Dirección de envío",name:"Nombre",phone:"Teléfono",address:"Dirección",
-    footer:"Este correo fue enviado automáticamente por Stripe Webhook."},
-  de:{subject:"Vielen Dank für Ihren Einkauf (Beleg)",heading:"Danke für Ihre Bestellung",
-    orderId:"Bestell-ID",payment:"Zahlung",buyer:"Käufer",
-    table:{name:"Artikel",unit:"Einzelpreis",qty:"Menge",subtotal:"Zwischensumme"},
-    total:"Gesamt",shipTo:"Lieferadresse",name:"Name",phone:"Telefon",address:"Adresse",
-    footer:"Diese E-Mail wurde automatisch vom Stripe Webhook gesendet."},
-  it:{subject:"Grazie per l'acquisto (ricevuta)",heading:"Grazie per il tuo ordine",
-    orderId:"ID ordine",payment:"Pagamento",buyer:"Acquirente",
-    table:{name:"Articolo",unit:"Prezzo unitario",qty:"Qtà",subtotal:"Subtotale"},
-    total:"Totale",shipTo:"Indirizzo di spedizione",name:"Nome",phone:"Telefono",address:"Indirizzo",
-    footer:"Questa e-mail è stata inviata automaticamente dal webhook di Stripe."},
-  pt:{subject:"Obrigado pela compra (recibo)",heading:"Obrigado pelo seu pedido",
-    orderId:"ID do pedido",payment:"Pagamento",buyer:"Comprador",
-    table:{name:"Item",unit:"Preço unitário",qty:"Qtd",subtotal:"Subtotal"},
-    total:"Total",shipTo:"Endereço de entrega",name:"Nome",phone:"Telefone",address:"Endereço",
-    footer:"Este e-mail foi enviado automaticamente pelo Stripe Webhook."},
-  "pt-BR":{subject:"Obrigado pela compra (recibo)",heading:"Obrigado pelo seu pedido",
-    orderId:"ID do pedido",payment:"Pagamento",buyer:"Comprador",
-    table:{name:"Item",unit:"Preço unitário",qty:"Qtd",subtotal:"Subtotal"},
-    total:"Total",shipTo:"Endereço de entrega",name:"Nome",phone:"Telefone",address:"Endereço",
-    footer:"Este e-mail foi enviado automaticamente pelo Stripe Webhook."},
-  ko:{subject:"구매해 주셔서 감사합니다 (영수증)",heading:"주문해 주셔서 감사합니다",
-    orderId:"주문 ID",payment:"결제",buyer:"구매자",
-    table:{name:"상품명",unit:"단가",qty:"수량",subtotal:"소계"},
-    total:"합계",shipTo:"배송지",name:"이름",phone:"전화",address:"주소",
-    footer:"이 메일은 Stripe Webhook에 의해 자동 전송되었습니다."},
-  zh:{subject:"感谢您的购买（收据）",heading:"感谢您的订单",
-    orderId:"订单编号",payment:"支付",buyer:"购买者",
-    table:{name:"商品名称",unit:"单价",qty:"数量",subtotal:"小计"},
-    total:"合计",shipTo:"收货地址",name:"姓名",phone:"电话",address:"地址",
-    footer:"此邮件由 Stripe Webhook 自动发送。"},
-  "zh-TW":{subject:"感謝您的購買（收據）",heading:"感謝您的訂單",
-    orderId:"訂單編號",payment:"付款",buyer:"購買者",
-    table:{name:"商品名稱",unit:"單價",qty:"數量",subtotal:"小計"},
-    total:"合計",shipTo:"收件地址",name:"姓名",phone:"電話",address:"地址",
-    footer:"此郵件由 Stripe Webhook 自動發送。"},
-  ru:{subject:"Спасибо за покупку (квитанция)",heading:"Спасибо за ваш заказ",
-    orderId:"ID заказа",payment:"Оплата",buyer:"Покупатель",
-    table:{name:"Товар",unit:"Цена",qty:"Кол-во",subtotal:"Промежуточный итог"},
-    total:"Итого",shipTo:"Адрес доставки",name:"Имя",phone:"Телефон",address:"Адрес",
-    footer:"Это письмо отправлено автоматически через Stripe Webhook."},
-  th:{subject:"ขอบคุณสำหรับการสั่งซื้อ (ใบเสร็จ)",heading:"ขอบคุณสำหรับคำสั่งซื้อ",
-    orderId:"รหัสคำสั่งซื้อ",payment:"การชำระเงิน",buyer:"ผู้ซื้อ",
-    table:{name:"สินค้า",unit:"ราคาต่อหน่วย",qty:"จำนวน",subtotal:"ยอดย่อย"},
-    total:"ยอดรวม",shipTo:"ที่อยู่จัดส่ง",name:"ชื่อ",phone:"โทร",address:"ที่อยู่",
-    footer:"อีเมลนี้ถูกส่งโดยอัตโนมัติจาก Stripe Webhook"},
-  vi:{subject:"Cảm ơn bạn đã mua hàng (biên nhận)",heading:"Cảm ơn bạn đã đặt hàng",
-    orderId:"Mã đơn hàng",payment:"Thanh toán",buyer:"Người mua",
-    table:{name:"Sản phẩm",unit:"Đơn giá",qty:"SL",subtotal:"Tạm tính"},
-    total:"Tổng",shipTo:"Địa chỉ giao hàng",name:"Tên",phone:"Điện thoại",address:"Địa chỉ",
-    footer:"Email này được gửi tự động bởi Stripe Webhook."},
-  id:{subject:"Terima kasih atas pembelian Anda (kwitansi)",heading:"Terima kasih atas pesanan Anda",
-    orderId:"ID Pesanan",payment:"Pembayaran",buyer:"Pembeli",
-    table:{name:"Produk",unit:"Harga satuan",qty:"Jml",subtotal:"Subtotal"},
-    total:"Total",shipTo:"Alamat pengiriman",name:"Nama",phone:"Telepon",address:"Alamat",
-    footer:"Email ini dikirim otomatis oleh Stripe Webhook."},
 };
 
-/* ========================= 明細生成：Stripe line_items から構築 ========================= */
-type MailItem = {
-  names: Partial<Record<LangKey, string>> & { default: string };
-  qty: number;
-  unitAmount: number;
-  subtotal: number;
+/* ========================= 文言 ========================= */
+const M = {
+  ja: {
+    buyerSubject: "ご購入ありがとうございます",
+    ownerSubject: "【注文通知】新しい注文が入りました",
+    thanks: "このたびはご購入ありがとうございます。以下がご注文内容です。",
+    summary: "ご注文サマリー",
+    item: "商品",
+    qty: "数量",
+    unit: "単価",
+    subtotal: "小計",
+    total: "合計",
+    name: "お名前",
+    email: "メール",
+    phone: "電話",
+    address: "住所",
+    payment: "決済手段",
+    note: "本メールは自動送信です。",
+    ownerHeading: "オーナー様向け注文通知（日本語固定）",
+  },
+  en: {
+    buyerSubject: "Thank you for your purchase",
+    ownerSubject: "New order received",
+    thanks: "Thank you for your purchase. Here are your order details.",
+    summary: "Order Summary",
+    item: "Item",
+    qty: "Qty",
+    unit: "Unit Price",
+    subtotal: "Subtotal",
+    total: "Total",
+    name: "Name",
+    email: "Email",
+    phone: "Phone",
+    address: "Address",
+    payment: "Payment Method",
+    note: "This email was sent automatically.",
+    ownerHeading: "Owner Notification (owner email is Japanese in practice)",
+  },
+  zh: { buyerSubject:"感谢您的购买", ownerSubject:"收到新订单", thanks:"感谢您的购买。以下是您的订单详情。", summary:"订单摘要", item:"商品", qty:"数量", unit:"单价", subtotal:"小计", total:"合计", name:"姓名", email:"邮箱", phone:"电话", address:"地址", payment:"支付方式", note:"此邮件为系统自动发送。", ownerHeading:"店主通知（店主邮件为日语）" },
+  "zh-TW": { buyerSubject:"感謝您的購買", ownerSubject:"收到新訂單", thanks:"感謝您的購買。以下為您的訂單明細。", summary:"訂單摘要", item:"品項", qty:"數量", unit:"單價", subtotal:"小計", total:"總計", name:"姓名", email:"電子郵件", phone:"電話", address:"地址", payment:"付款方式", note:"本郵件為系統自動發送。", ownerHeading:"店主通知（店主郵件為日文）" },
+  ko: { buyerSubject:"구매해 주셔서 감사합니다", ownerSubject:"새 주문이 접수되었습니다", thanks:"구매해 주셔서 감사합니다. 주문 상세는 아래와 같습니다.", summary:"주문 요약", item:"상품", qty:"수량", unit:"단가", subtotal:"소계", total:"합계", name:"이름", email:"이메일", phone:"전화", address:"주소", payment:"결제 수단", note:"이 메일은 자동 발송되었습니다.", ownerHeading:"점주 알림(점주 메일은 일본어)" },
+  fr: { buyerSubject:"Merci pour votre achat", ownerSubject:"Nouvelle commande reçue", thanks:"Merci pour votre achat. Voici le récapitulatif de votre commande.", summary:"Récapitulatif de commande", item:"Article", qty:"Qté", unit:"Prix unitaire", subtotal:"Sous-total", total:"Total", name:"Nom", email:"E-mail", phone:"Téléphone", address:"Adresse", payment:"Mode de paiement", note:"E-mail envoyé automatiquement.", ownerHeading:"Notification propriétaire (mail réel en japonais)" },
+  es: { buyerSubject:"Gracias por tu compra", ownerSubject:"Nuevo pedido recibido", thanks:"Gracias por tu compra. Estos son los detalles de tu pedido.", summary:"Resumen del pedido", item:"Artículo", qty:"Cant.", unit:"Precio unidad", subtotal:"Subtotal", total:"Total", name:"Nombre", email:"Correo", phone:"Teléfono", address:"Dirección", payment:"Método de pago", note:"Este correo se envió automáticamente.", ownerHeading:"Aviso al propietario (correo real en japonés)" },
+} as const;
+
+/* ========================= 決済手段抽出 ========================= */
+type PMDetails = {
+  type?: string;
+  brand?: string;     // null は使わず undefined に統一
+  last4?: string;
+  walletType?: string;
+  extra?: Record<string, any>;
 };
-const getName = (mi: MailItem, lang: LangKey): string => mi.names[lang] || mi.names.default;
+const extractPM = (pi: Stripe.PaymentIntent | null): PMDetails => {
+  const ch = (pi?.latest_charge as Stripe.Charge | undefined) || undefined;
+  const d = ch?.payment_method_details as Stripe.Charge.PaymentMethodDetails | undefined;
+  if (!d) return {};
+  const t = d.type;
 
-async function buildItemsFromStripe(
-  session: Stripe.Checkout.Session,
-  reqOpts?: Stripe.RequestOptions
-): Promise<MailItem[]> {
-  const li = await stripe.checkout.sessions.listLineItems(
-    session.id,
-    { expand: ["data.price.product"], limit: 100 },
-    reqOpts
-  );
+  if (t === "card" && d.card) {
+    return {
+      type: "card",
+      brand: d.card.brand || undefined,
+      last4: d.card.last4 || undefined,
+      extra: { funding: d.card.funding || undefined },
+    };
+  }
+  if ((d as any).wallet) {
+    return { type: t, walletType: (d as any).wallet?.type || undefined };
+  }
+  return { type: t };
+};
 
-  // 保険：Checkout で詰めた items_i18n を読む
-  let itemsI18n: Record<string, { qty?: number; names?: Record<string,string> }> = {};
+/* ========================= 電話決定（shipping_details 型差は any で吸収） ========================= */
+const resolvePhone = (s: Stripe.Checkout.Session, pi: Stripe.PaymentIntent | null) => {
+  const fromCustomer = s.customer_details?.phone || undefined;
+  if (fromCustomer) return fromCustomer;
+  const ship = (s as any)?.shipping_details as { phone?: string | null } | undefined;
+  if (ship?.phone) return ship.phone;
+  const ch = (pi?.latest_charge as Stripe.Charge | undefined) || undefined;
+  return ch?.billing_details?.phone || undefined;
+};
+
+/* ========================= オーナーEmail取得 ========================= */
+const fetchOwnerEmail = async (siteKey?: string | null) => {
+  if (!siteKey) return undefined;
   try {
-    const raw = (session.metadata as any)?.items_i18n;
-    if (raw) {
-      const arr = JSON.parse(raw) as Array<{id:string; qty:number; names?:Record<string,string>}>;
-      itemsI18n = Object.fromEntries(arr.map(o => [o.id, {qty:o.qty, names:o.names||{}}]));
-    }
+    const a = await adminDb.collection("siteSettings").doc(siteKey).get();
+    if (a.exists && a.data()?.ownerEmail) return a.data()!.ownerEmail as string;
+    const b = await adminDb.collection("siteSettingsEditable").doc(siteKey).get();
+    if (b.exists && b.data()?.ownerEmail) return b.data()!.ownerEmail as string;
   } catch {}
+  return undefined;
+};
 
-  return li.data.map((x) => {
-    const prod = x.price?.product as Stripe.Product | undefined;
-    const pid = (prod?.metadata as any)?.productId as string | undefined;
-
-    // 1) name_xx を集める
-    const names: MailItem["names"] = { default: "" };
-    (["ja","en","fr","es","de","it","pt","pt-BR","ko","zh","zh-TW","ru","th","vi","id"] as LangKey[])
-      .forEach((k) => {
-        const key = `name_${k}`;
-        const v = (prod?.metadata as any)?.[key] || itemsI18n[pid||""]?.names?.[k];
-        if (typeof v === "string" && v.trim()) names[k] = v;
-      });
-
-    // 2) 既定名の優先度（“Item” 撲滅）
-    names.default =
-      (prod?.metadata as any)?.name ||
-      prod?.name ||
-      itemsI18n[pid||""]?.names?.ja ||
-      x.description ||
-      "Item";
-
-    const qty = x.quantity || itemsI18n[pid||""]?.qty || 1;
-
-    // 3) 金額は Stripe line item（購入通貨）
-    const subMajor = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
-    const unitMajor = subMajor / Math.max(1, qty);
-
-    return { names, qty, unitAmount: unitMajor, subtotal: subMajor };
-  });
-}
-
-/* -------------------- メールHTML（オーナー：日本語固定） -------------------- */
-function buildOwnerHtmlJa(
-  session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
-  items: MailItem[]
-) {
-  const cur = (session.currency || "jpy").toUpperCase();
-  const locale = "ja-JP";
-
-  const ship = (session as any).shipping_details as
-    | { name?: string | null; phone?: string | null; address?: Stripe.Address | null }
-    | undefined;
-  const cust = session.customer_details;
-
-  const name = ship?.name ?? cust?.name ?? "-";
-  const phone = cust?.phone ?? ship?.phone ?? "-";
-  const addrObj: Stripe.Address | undefined = ship?.address ?? cust?.address ?? undefined;
-
-  const addr = [
-    addrObj?.postal_code ? `〒${addrObj.postal_code}` : "",
-    addrObj?.state, addrObj?.city, addrObj?.line1, addrObj?.line2,
-    addrObj?.country && addrObj.country !== "JP" ? addrObj.country : "",
-  ].filter(Boolean).join(" ");
-
-  const buyer = cust?.email || session.customer_email || "-";
-  const total = toMajor(session.amount_total, session.currency);
-
-  const rows = items.map((it) => `
-      <tr>
-        <td style="padding:6px 8px;border-bottom:1px solid #eee;">${getName(it, "ja")}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(it.unitAmount, cur, locale)}</td>
-        <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(it.subtotal, cur, locale)}</td>
-      </tr>`).join("");
+/* ========================= メールHTML ========================= */
+type MailItem = { name: string; qty: number; unitMinor: number };
+const renderEmail = (
+  lang: LangKey,
+  p: {
+    isOwner: boolean;
+    currency: string;
+    totalMinor: number;
+    items: MailItem[];
+    customer: { name?: string | null; email?: string | null; phone?: string | null; addressText?: string };
+    payment: PMDetails;
+  }
+) => {
+  const T = M[lang];
+  const rows = p.items.map((it) => {
+    const unit = formatMoney(p.currency, it.unitMinor);
+    const sub  = formatMoney(p.currency, it.unitMinor * it.qty);
+    return `<tr>
+      <td style="padding:6px 8px;border:1px solid #ddd;">${it.name}</td>
+      <td style="padding:6px 8px;border:1px solid #ddd;text-align:center;">${it.qty}</td>
+      <td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${unit}</td>
+      <td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${sub}</td>
+    </tr>`;
+  }).join("");
+  const total = formatMoney(p.currency, p.totalMinor);
+  const pmText =
+    p.payment.type === "card"
+      ? `card ${p.payment.brand ? p.payment.brand + " " : ""}${p.payment.last4 ? "****" + p.payment.last4 : ""}`.trim()
+      : p.payment.type || "unknown";
+  const heading = p.isOwner ? (lang === "ja" ? M.ja.ownerHeading : M.en.ownerHeading) : T.thanks;
 
   return `
-  <div style="font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial;">
-    <h2>新しい注文が完了しました</h2>
-    <p>注文ID: <b>${session.id}</b>／支払い: <b>${session.payment_status}</b></p>
-    <p>購入者: <b>${buyer}</b></p>
-    <table style="border-collapse:collapse;width:100%;max-width:680px;">
-      <thead><tr>
-        <th style="text-align:left;border-bottom:2px solid #333;">商品名</th>
-        <th style="text-align:right;border-bottom:2px solid #333;">単価</th>
-        <th style="text-align:center;border-bottom:2px solid #333;">数量</th>
-        <th style="text-align:right;border-bottom:2px solid #333;">小計</th>
-      </tr></thead>
+  <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,'Noto Sans',sans-serif;line-height:1.6;">
+    <h2>${heading}</h2>
+    ${p.isOwner ? "" : `<p>${T.thanks}</p>`}
+    <h3>${T.summary}</h3>
+    <table style="border-collapse:collapse;min-width:520px;">
+      <thead>
+        <tr>
+          <th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">${T.item}</th>
+          <th style="padding:6px 8px;border:1px solid #ddd;text-align:center;">${T.qty}</th>
+          <th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${T.unit}</th>
+          <th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${T.subtotal}</th>
+        </tr>
+      </thead>
       <tbody>${rows}</tbody>
+      <tfoot>
+        <tr>
+          <td colspan="3" style="padding:6px 8px;border:1px solid #ddd;text-align:right;font-weight:600;">${T.total}</td>
+          <td style="padding:6px 8px;border:1px solid #ddd;text-align:right;font-weight:600;">${total}</td>
+        </tr>
+      </tfoot>
     </table>
-    <p style="margin-top:12px;">合計: <b>${fmtCur(total, cur, locale)}</b></p>
-    <h3>お届け先</h3>
-    <p>氏名：${name}<br/>電話：${phone}<br/>住所：${addr || "-"}</p>
-    <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
-    <p style="color:#666;font-size:12px;">このメールは Stripe Webhook により自動送信されています。</p>
+
+    <h3 style="margin-top:16px;">${T.payment}</h3>
+    <p>${pmText}</p>
+
+    <h3>${T.name} / ${T.email} / ${T.phone}</h3>
+    <p>
+      ${T.name}: ${p.customer.name || ""}<br/>
+      ${T.email}: ${p.customer.email || ""}<br/>
+      ${T.phone}: ${p.customer.phone || ""}
+    </p>
+    <h3>${T.address}</h3>
+    <p>${p.customer.addressText || ""}</p>
+
+    <p style="color:#666;">${T.note}</p>
   </div>`;
-}
+};
 
-/* -------------------- メールHTML（購入者：多言語） -------------------- */
-function buildBuyerHtmlI18n(
-  lang: LangKey,
-  session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
-  items: MailItem[]
-) {
-  const t = buyerText[lang] || buyerText.en;
-  const cur = (session.currency || "jpy").toUpperCase();
-  const locale = LOCALE_BY_LANG[lang] || "en";
+/* ========================= ログ保存 ========================= */
+const logWebhook = async (entry: any) => {
+  try {
+    await adminDb.collection("stripeWebhookLogs").add({ ...entry, createdAt: new Date() });
+  } catch {}
+};
 
-  const ship = (session as any).shipping_details as
-    | { name?: string | null; phone?: string | null; address?: Stripe.Address | null }
-    | undefined;
-  const cust = session.customer_details;
+/* ========================= Firestore 注文保存 ========================= */
+const saveOrder = async (args: {
+  session: Stripe.Checkout.Session;
+  itemsBuyer: MailItem[];
+  itemsJa: MailItem[];
+  pm: PMDetails;
+  phone?: string;
+  account?: string | null;
+}) => {
+  const { session, itemsBuyer, itemsJa, pm, phone, account } = args;
 
-  const name = ship?.name ?? cust?.name ?? "-";
-  const phone = cust?.phone ?? ship?.phone ?? "-";
-  const addrObj: Stripe.Address | undefined = ship?.address ?? cust?.address ?? undefined;
+  const ship = (session as any)?.shipping_details as { address?: any; name?: string | null } | undefined;
+  const addr = ship?.address || (session.customer_details?.address as any) || null;
+  const addressText = addr
+    ? [addr.country, addr.postal_code, addr.state, addr.city, addr.line1, addr.line2].filter(Boolean).join(" ")
+    : "";
 
-  const addr = [
-    addrObj?.postal_code, addrObj?.state, addrObj?.city, addrObj?.line1, addrObj?.line2,
-    addrObj?.country && addrObj?.country !== "JP" ? addrObj.country : "",
-  ].filter(Boolean).join(" ");
-
-  const buyer = cust?.email || session.customer_email || "-";
-  const total = toMajor(session.amount_total, session.currency);
-
-  const rows = items.map((it) => `
-      <tr>
-        <td style="padding:6px 8px;border-bottom:1px solid #eee;">${getName(it, lang)}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(it.unitAmount, cur, locale)}</td>
-        <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(it.subtotal, cur, locale)}</td>
-      </tr>`).join("");
-
-  return {
-    subject: t.subject,
-    html: `
-    <div style="font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial;">
-      <h2>${t.heading}</h2>
-      <p>${t.orderId}: <b>${session.id}</b> / ${t.payment}: <b>${session.payment_status}</b></p>
-      <p>${t.buyer}: <b>${buyer}</b></p>
-      <table style="border-collapse:collapse;width:100%;max-width:680px;">
-        <thead><tr>
-          <th style="text-align:left;border-bottom:2px solid #333;">${t.table.name}</th>
-          <th style="text-align:right;border-bottom:2px solid #333;">${t.table.unit}</th>
-          <th style="text-align:center;border-bottom:2px solid #333;">${t.table.qty}</th>
-          <th style="text-align:right;border-bottom:2px solid #333;">${t.table.subtotal}</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-      <p style="margin-top:12px;"><b>${t.total}: ${fmtCur(total, cur, locale)}</b></p>
-      <h3>${t.shipTo}</h3>
-      <p>${t.name}: ${name}<br/>${t.phone}: ${phone}<br/>${t.address}: ${addr || "-"}</p>
-      <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
-      <p style="color:#666;font-size:12px;">${t.footer}</p>
-    </div>`,
+  const data = {
+    siteKey: (session.metadata?.siteKey as string | undefined) || null,
+    account,
+    payment_status: session.payment_status,
+    amount_total: session.amount_total || null,
+    currency: session.currency || null,
+    createdAt: new Date(),
+    customer: {
+      name: session.customer_details?.name || ship?.name || null,
+      email: session.customer_details?.email || null,
+      phone: phone || null,
+      address: {
+        country: addr?.country || null,
+        postal_code: addr?.postal_code || null,
+        state: addr?.state || null,
+        city: addr?.city || null,
+        line1: addr?.line1 || null,
+        line2: addr?.line2 || null,
+      },
+      addressText,
+    },
+    items:   itemsBuyer.map(i => ({ name: i.name, qty: i.qty, unitAmount: i.unitMinor })),
+    items_ja: itemsJa.map(i => ({ name: i.name, qty: i.qty, unitAmount: i.unitMinor })),
+    payment_method: pm,
+    raw: { sessionId: session.id, payment_intent: session.payment_intent || null },
   };
-}
 
-/* ============================================================
-   Webhook 本体
-============================================================ */
+  await adminDb.collection("orders").doc(session.id).set(data, { merge: true });
+};
+
+/* ========================= Webhook 本体 ========================= */
 export async function POST(req: NextRequest) {
-  const body = await req.text();
+  const raw = await req.arrayBuffer();
   const sig = (await headers()).get("stripe-signature");
 
+  // 失敗時も 200（Stripe リトライ渋滞回避）
   if (!sig) {
-    console.error("⚠️ Missing stripe-signature header");
-    await logOrderMail({ siteKey: null, ownerEmail: null, sessionId: null,
-      eventType: "missing_signature", sent: false, reason: "stripe-signature header missing" });
-    return new Response("OK", { status: 200 });
+    await logWebhook({ level: "error", msg: "missing stripe-signature" });
+    return new Response("ok", { status: 200 });
   }
 
   let event: Stripe.Event;
   try {
-    event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!);
-  } catch (err) {
-    console.error("❌ Webhook signature verification failed:", safeErr(err));
-    await logOrderMail({ siteKey: null, ownerEmail: null, sessionId: null,
-      eventType: "signature_error", sent: false, reason: `signature error: ${safeErr(err)}` });
-    return new Response("OK", { status: 200 });
+    event = stripe.webhooks.constructEvent(Buffer.from(raw), sig, process.env.STRIPE_WEBHOOK_SECRET!);
+  } catch (e: any) {
+    await logWebhook({ level: "error", msg: "constructEvent failed", error: String(e?.message || e) });
+    return new Response("ok", { status: 200 });
   }
 
-  if (event.type !== "checkout.session.completed") {
-    return new Response("OK", { status: 200 });
-  }
-
-  const connectedAccountId = (event as any).account as string | undefined;
-  const reqOpts: Stripe.RequestOptions | undefined = connectedAccountId ? { stripeAccount: connectedAccountId } : undefined;
-
-  const session = event.data.object as Stripe.Checkout.Session & {
-    metadata?: { siteKey?: string; lang?: string };
-    shipping_details?: ShippingDetails;
-  };
+  const account = (event as any).account || null; // Connect 時
+  const reqOpt = account ? { stripeAccount: account } : undefined;
 
   try {
-    /* ---------- A) PaymentIntent / 決済手段 & 電話番号 ---------- */
-    let pi: Stripe.PaymentIntent | null = null;
-    try {
-      pi = await stripe.paymentIntents.retrieve(
-        session.payment_intent as string,
-        { expand: ["latest_charge"] },
-        reqOpts
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object as Stripe.Checkout.Session;
+
+      // 商品まで展開（←「Item」固定を回避する肝）
+      const li = await stripe.checkout.sessions.listLineItems(
+        session.id,
+        { limit: 100, expand: ["data.price.product"] },
+        reqOpt
       );
-    } catch (e) {
-      console.warn("⚠️ paymentIntents.retrieve failed:", safeErr(e));
-    }
-    const ch = pi?.latest_charge as Stripe.Charge | undefined;
-    const pm = ch?.payment_method_details;
-    const paymentType = pm?.type || null;
-    const cardBrand = pm?.card?.brand || null;
-    const last4 = pm?.card?.last4 || null;
 
-    const phoneFallback =
-      session.customer_details?.phone ??
-      (session as any).shipping_details?.phone ??
-      ch?.billing_details?.phone ??
-      null;
+      // 決済Intent（決済手段/請求先）
+      let pi: Stripe.PaymentIntent | null = null;
+      if (session.payment_intent) {
+        const id = typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent.id;
+        pi = await stripe.paymentIntents.retrieve(
+          id,
+          { expand: ["latest_charge.payment_method_details","latest_charge.billing_details"] },
+          reqOpt
+        );
+      }
 
-    /* ---------- B) 明細（必ず Stripe line_items 起点） ---------- */
-    const buyerLang = normalizeLang(session.metadata?.lang || (session.locale as string) || "en");
-    let items: MailItem[] = [];
-    try {
-      items = await buildItemsFromStripe(session, reqOpts);
-    } catch (e) {
-      console.error("❌ listLineItems failed:", safeErr(e));
-      const totalMajor = toMajor(session.amount_total, session.currency);
-      items = [{ names: { default: "Item" }, qty: 1, unitAmount: totalMajor, subtotal: totalMajor }];
-    }
+      const buyerLang = resolveBuyerLang(session);
+      const pm = extractPM(pi);
+      const phone = resolvePhone(session, pi);
 
-    /* ---------- C) Firestore 保存 ---------- */
-    await adminDb.collection("siteOrders").add({
-      siteKey: session.metadata?.siteKey || null,
-      createdAt: new Date(),
-      stripeCheckoutSessionId: session.id,
-      amount: session.amount_total,
-      currency: session.currency,
-      payment_status: session.payment_status,
-      payment_type: paymentType,
-      card_brand: cardBrand,
-      card_last4: last4,
-      customer: {
-        email: session.customer_details?.email ?? null,
-        name: session.customer_details?.name ?? (session as any).shipping_details?.name ?? null,
-        phone: phoneFallback,
-        address:
-          session.customer_details?.address ??
-          (session as any).shipping_details?.address ??
-          null,
-      },
-      items: items.map(i => ({
-        name: i.names.default,
-        qty: i.qty,
-        unitAmount: i.unitAmount,
-        subtotal: i.subtotal,
-      })),
-      buyer_lang: buyerLang,
-    });
+      const itemsBuyer: MailItem[] = [];
+      const itemsJa:    MailItem[] = [];
 
-    /* ---------- D) siteKey 解決 & stripeCustomerId 保存 ---------- */
-    const customerId = (session.customer as string) || null;
-    const siteKey: string | null =
-      session.metadata?.siteKey
-      ?? (connectedAccountId ? await findSiteKeyByConnectAccount(connectedAccountId) : null)
-      ?? session.client_reference_id
-      ?? (customerId ? await findSiteKeyByCustomerId(customerId) : null);
+      for (const x of li.data) {
+        const qty = x.quantity ?? 1;
+        const unitMinor =
+          (x.price?.unit_amount as number | null | undefined) ??
+          Math.round(((x.amount_subtotal || 0) / Math.max(1, qty)));
 
-    if (siteKey && customerId) {
-      await adminDb.doc(`siteSettings/${siteKey}`).set({ stripeCustomerId: customerId }, { merge: true });
-    }
+        const product = x.price?.product as Stripe.Product | string | null;
+        const prodObj: Stripe.Product | undefined =
+          product && typeof product !== "string" ? (product as Stripe.Product) : undefined;
 
-    /* ---------- E) オーナー宛（日本語） ---------- */
-    if (siteKey) {
-      const ownerEmail = await getOwnerEmail(siteKey);
+        // Buyer 表示名：product.name（Checkout 作成時の product_data.name）→ description → nickname → "Item"
+        const nameBuyer =
+          prodObj?.name || x.description || x.price?.nickname || "Item";
+
+        // Owner（日本語）表示名：metadata.name_ja → metadata.name → product.name → description → nickname → "Item"
+        const meta: any = prodObj?.metadata || {};
+        const nameJa =
+          meta.name_ja || meta.name || prodObj?.name || x.description || x.price?.nickname || "Item";
+
+        itemsBuyer.push({ name: String(nameBuyer), qty, unitMinor: Number(unitMinor || 0) });
+        itemsJa.push({ name: String(nameJa), qty, unitMinor: Number(unitMinor || 0) });
+      }
+
+      // Firestore 保存
+      await saveOrder({ session, itemsBuyer, itemsJa, pm, phone, account });
+
+      // メール共通
+      const currency = session.currency || "jpy";
+      const totalMinor = session.amount_total || 0;
+
+      const ship = (session as any)?.shipping_details as { address?: any; name?: string | null } | undefined;
+      const addr = ship?.address || (session.customer_details?.address as any) || null;
+      const addressText = addr
+        ? [addr.country, addr.postal_code, addr.state, addr.city, addr.line1, addr.line2].filter(Boolean).join(" ")
+        : "";
+      const customer = {
+        name: session.customer_details?.name || ship?.name || "",
+        email: session.customer_details?.email || "",
+        phone: phone || "",
+        addressText,
+      };
+
+      // ── オーナー宛（日本語固定）
+      const siteKey = (session.metadata?.siteKey as string | undefined) || null;
+      const ownerEmail = (await fetchOwnerEmail(siteKey)) || process.env.FALLBACK_OWNER_EMAIL || "";
       if (ownerEmail) {
-        const ownerHtml = buildOwnerHtmlJa(session, items);
-        try {
-          await sendMail({ to: ownerEmail, subject: "【注文通知】新しい注文が完了しました", html: ownerHtml });
-          await logOrderMail({ siteKey, ownerEmail, sessionId: session.id, eventType: event.type, sent: true });
-        } catch (e) {
-          console.error("❌ sendMail(owner) failed:", safeErr(e));
-          await logOrderMail({
-            siteKey, ownerEmail, sessionId: session.id, eventType: event.type, sent: false,
-            reason: `sendMail(owner) failed: ${safeErr(e)}`,
-          });
-        }
-      } else {
-        await logOrderMail({
-          siteKey, ownerEmail: null, sessionId: session.id, eventType: event.type, sent: false,
-          reason: `ownerEmail not found at siteSettings/${siteKey}`,
+        const ownerHtml = renderEmail("ja", {
+          isOwner: true,
+          currency,
+          totalMinor,
+          items: itemsJa,
+          customer,
+          payment: pm,
         });
+        await sendMail({ to: ownerEmail, subject: M.ja.ownerSubject, html: ownerHtml })
+          .catch(async (e) => {
+            await logWebhook({ level: "error", msg: "owner mail failed", error: String(e?.message || e), ownerEmail });
+          });
+      } else {
+        await logWebhook({ level: "warn", msg: "ownerEmail not found", siteKey });
       }
-    } else {
-      await logOrderMail({
-        siteKey: null, ownerEmail: null, sessionId: session.id, eventType: event.type, sent: false,
-        reason: "siteKey unresolved", extras: { connectedAccountId, customerId, metadata: session.metadata ?? null },
-      });
-    }
 
-    /* ---------- F) 購入者宛（多言語） ---------- */
-    try {
-      const buyerEmail = session.customer_details?.email || session.customer_email || null;
+      // ── 購入者宛（購入時選択言語）
+      const buyerEmail = session.customer_details?.email || "";
       if (buyerEmail) {
-        const buyerMail = buildBuyerHtmlI18n(buyerLang, session, items);
-        await sendMail({ to: buyerEmail, subject: buyerMail.subject, html: buyerMail.html });
+        const buyerHtml = renderEmail(buyerLang, {
+          isOwner: false,
+          currency,
+          totalMinor,
+          items: itemsBuyer,
+          customer,
+          payment: pm,
+        });
+        await sendMail({ to: buyerEmail, subject: M[buyerLang].buyerSubject, html: buyerHtml })
+          .catch(async (e) => {
+            await logWebhook({ level: "error", msg: "buyer mail failed", error: String(e?.message || e), buyerEmail });
+          });
+      } else {
+        await logWebhook({ level: "warn", msg: "buyerEmail missing" });
       }
-    } catch (e) {
-      console.error("❌ sendMail(buyer) failed:", safeErr(e));
-    }
 
-    return new Response("OK", { status: 200 });
-  } catch (err) {
-    console.error("🔥 webhook handler error:", safeErr(err));
-    await logOrderMail({
-      siteKey: session.metadata?.siteKey ?? null,
-      ownerEmail: null,
-      sessionId: session.id,
-      eventType: event.type,
-      sent: false,
-      reason: `handler error: ${safeErr(err)}`,
-    });
-    return new Response("OK", { status: 200 });
+      await logWebhook({
+        level: "info",
+        type: event.type,
+        sessionId: session.id,
+        currency,
+        amount_total: totalMinor,
+        account,
+        pm,
+      });
+    } else {
+      await logWebhook({ level: "debug", type: event.type, id: event.id, account });
+    }
+  } catch (e: any) {
+    await logWebhook({ level: "error", msg: "webhook handler error", type: event.type, account, error: String(e?.message || e) });
+    return new Response("ok", { status: 200 });
   }
+
+  return new Response("ok", { status: 200 });
 }

@@ -1,4 +1,9 @@
-// app/api/stripe/webhook/route.ts（管理ウェブ側）
+// app/api/stripe/webhook/route.ts（管理ウェブ側：要件版）
+// - オーナー宛メール：日本語固定
+// - 購入者宛メール：購入時に選択した言語（metadata.lang）で送信
+// - 金額表記：購入時の通貨（session.currency）で表記（小計/単価/合計すべて）
+// - 決済手段：PaymentIntent → latest_charge.payment_method_details から取得して保存
+
 import { stripe } from "@/lib/stripe";
 import { adminDb } from "@/lib/firebase-admin";
 import { sendMail } from "@/lib/mailer";
@@ -40,7 +45,36 @@ const safeErr = (e: unknown) => {
   }
 };
 
-const fmtJPY = (n: number) => `¥${Math.round(n).toLocaleString()}`;
+// 通貨汎用フォーマッタ（購入通貨で表記）
+const fmtCur = (n: number, cur?: string, locale = "en") => {
+  const c = (cur ?? "jpy").toUpperCase();
+  const zero = ZERO_DEC.has(c.toLowerCase());
+  return new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency: c,
+    maximumFractionDigits: zero ? 0 : 2,
+    minimumFractionDigits: zero ? 0 : 2,
+  }).format(n);
+};
+
+// 言語キー → 推奨ロケール
+const LOCALE_BY_LANG: Record<string, string> = {
+  ja: "ja-JP",
+  en: "en",
+  fr: "fr-FR",
+  es: "es-ES",
+  de: "de-DE",
+  it: "it-IT",
+  pt: "pt-PT",
+  "pt-BR": "pt-BR",
+  ko: "ko-KR",
+  zh: "zh-CN",
+  "zh-TW": "zh-TW",
+  ru: "ru-RU",
+  th: "th-TH",
+  vi: "vi-VN",
+  id: "id-ID",
+};
 
 /* -------------------- Firestore helpers -------------------- */
 async function findSiteKeyByCustomerId(customerId: string): Promise<string | null> {
@@ -94,7 +128,7 @@ function normalizeLang(input?: string | null): LangKey {
   if (v.startsWith("ja")) return "ja";
   if (v.startsWith("en")) return "en";
   if (v.startsWith("fr")) return "fr";
-  if (v.startsWith("es-419")) return "es"; // まとめて es
+  if (v.startsWith("es-419")) return "es";
   if (v.startsWith("es")) return "es";
   if (v.startsWith("de")) return "de";
   if (v.startsWith("it")) return "it";
@@ -118,7 +152,7 @@ const buyerText: Record<LangKey, {
   payment: string;
   buyer: string;
   table: { name: string; unit: string; qty: string; subtotal: string; };
-  total: (amount: number, cur: string) => string;
+  total: string;
   shipTo: string;
   name: string;
   phone: string;
@@ -126,13 +160,13 @@ const buyerText: Record<LangKey, {
   footer: string;
 }> = {
   ja: {
-    subject: "ご購入ありがとうございます（ご注文のレシート）",
+    subject: "ご購入ありがとうございます（レシート）",
     heading: "ご注文ありがとうございます",
     orderId: "注文ID",
     payment: "支払い",
     buyer: "購入者",
-    table: { name: "商品名", unit: "単価（税込）", qty: "数量", subtotal: "小計" },
-    total: (a, c) => `合計: ${fmtJPY(a)}（${c.toUpperCase()}）`,
+    table: { name: "商品名", unit: "単価", qty: "数量", subtotal: "小計" },
+    total: "合計",
     shipTo: "お届け先",
     name: "氏名",
     phone: "電話",
@@ -145,8 +179,8 @@ const buyerText: Record<LangKey, {
     orderId: "Order ID",
     payment: "Payment",
     buyer: "Buyer",
-    table: { name: "Item", unit: "Unit price (tax incl.)", qty: "Qty", subtotal: "Subtotal" },
-    total: (a, c) => `Total: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "Item", unit: "Unit price", qty: "Qty", subtotal: "Subtotal" },
+    total: "Total",
     shipTo: "Shipping address",
     name: "Name",
     phone: "Phone",
@@ -159,8 +193,8 @@ const buyerText: Record<LangKey, {
     orderId: "ID de commande",
     payment: "Paiement",
     buyer: "Acheteur",
-    table: { name: "Article", unit: "Prix unitaire (TTC)", qty: "Qté", subtotal: "Sous-total" },
-    total: (a, c) => `Total : ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "Article", unit: "Prix unitaire", qty: "Qté", subtotal: "Sous-total" },
+    total: "Total",
     shipTo: "Adresse de livraison",
     name: "Nom",
     phone: "Téléphone",
@@ -173,8 +207,8 @@ const buyerText: Record<LangKey, {
     orderId: "ID de pedido",
     payment: "Pago",
     buyer: "Comprador",
-    table: { name: "Producto", unit: "Precio unitario (IVA incl.)", qty: "Cant.", subtotal: "Subtotal" },
-    total: (a, c) => `Total: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "Producto", unit: "Precio unitario", qty: "Cant.", subtotal: "Subtotal" },
+    total: "Total",
     shipTo: "Dirección de envío",
     name: "Nombre",
     phone: "Teléfono",
@@ -187,8 +221,8 @@ const buyerText: Record<LangKey, {
     orderId: "Bestell-ID",
     payment: "Zahlung",
     buyer: "Käufer",
-    table: { name: "Artikel", unit: "Einzelpreis (inkl. MwSt.)", qty: "Menge", subtotal: "Zwischensumme" },
-    total: (a, c) => `Gesamt: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "Artikel", unit: "Einzelpreis", qty: "Menge", subtotal: "Zwischensumme" },
+    total: "Gesamt",
     shipTo: "Lieferadresse",
     name: "Name",
     phone: "Telefon",
@@ -201,8 +235,8 @@ const buyerText: Record<LangKey, {
     orderId: "ID ordine",
     payment: "Pagamento",
     buyer: "Acquirente",
-    table: { name: "Articolo", unit: "Prezzo unitario (IVA incl.)", qty: "Qtà", subtotal: "Subtotale" },
-    total: (a, c) => `Totale: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "Articolo", unit: "Prezzo unitario", qty: "Qtà", subtotal: "Subtotale" },
+    total: "Totale",
     shipTo: "Indirizzo di spedizione",
     name: "Nome",
     phone: "Telefono",
@@ -215,8 +249,8 @@ const buyerText: Record<LangKey, {
     orderId: "ID do pedido",
     payment: "Pagamento",
     buyer: "Comprador",
-    table: { name: "Item", unit: "Preço unit. (c/ imposto)", qty: "Qtd", subtotal: "Subtotal" },
-    total: (a, c) => `Total: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "Item", unit: "Preço unitário", qty: "Qtd", subtotal: "Subtotal" },
+    total: "Total",
     shipTo: "Endereço de entrega",
     name: "Nome",
     phone: "Telefone",
@@ -229,8 +263,8 @@ const buyerText: Record<LangKey, {
     orderId: "ID do pedido",
     payment: "Pagamento",
     buyer: "Comprador",
-    table: { name: "Item", unit: "Preço unit. (c/ imposto)", qty: "Qtd", subtotal: "Subtotal" },
-    total: (a, c) => `Total: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "Item", unit: "Preço unitário", qty: "Qtd", subtotal: "Subtotal" },
+    total: "Total",
     shipTo: "Endereço de entrega",
     name: "Nome",
     phone: "Telefone",
@@ -243,8 +277,8 @@ const buyerText: Record<LangKey, {
     orderId: "주문 ID",
     payment: "결제",
     buyer: "구매자",
-    table: { name: "상품명", unit: "단가(세금 포함)", qty: "수량", subtotal: "소계" },
-    total: (a, c) => `합계: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "상품명", unit: "단가", qty: "수량", subtotal: "소계" },
+    total: "합계",
     shipTo: "배송지",
     name: "이름",
     phone: "전화",
@@ -257,8 +291,8 @@ const buyerText: Record<LangKey, {
     orderId: "订单编号",
     payment: "支付",
     buyer: "购买者",
-    table: { name: "商品名称", unit: "单价（含税）", qty: "数量", subtotal: "小计" },
-    total: (a, c) => `合计：${fmtJPY(a)}（${c.toUpperCase()}）`,
+    table: { name: "商品名称", unit: "单价", qty: "数量", subtotal: "小计" },
+    total: "合计",
     shipTo: "收货地址",
     name: "姓名",
     phone: "电话",
@@ -271,8 +305,8 @@ const buyerText: Record<LangKey, {
     orderId: "訂單編號",
     payment: "付款",
     buyer: "購買者",
-    table: { name: "商品名稱", unit: "單價（含稅）", qty: "數量", subtotal: "小計" },
-    total: (a, c) => `合計：${fmtJPY(a)}（${c.toUpperCase()}）`,
+    table: { name: "商品名稱", unit: "單價", qty: "數量", subtotal: "小計" },
+    total: "合計",
     shipTo: "收件地址",
     name: "姓名",
     phone: "電話",
@@ -285,8 +319,8 @@ const buyerText: Record<LangKey, {
     orderId: "ID заказа",
     payment: "Оплата",
     buyer: "Покупатель",
-    table: { name: "Товар", unit: "Цена (с налогом)", qty: "Кол-во", subtotal: "Промежуточный итог" },
-    total: (a, c) => `Итого: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "Товар", unit: "Цена", qty: "Кол-во", subtotal: "Промежуточный итог" },
+    total: "Итого",
     shipTo: "Адрес доставки",
     name: "Имя",
     phone: "Телефон",
@@ -299,8 +333,8 @@ const buyerText: Record<LangKey, {
     orderId: "รหัสคำสั่งซื้อ",
     payment: "การชำระเงิน",
     buyer: "ผู้ซื้อ",
-    table: { name: "สินค้า", unit: "ราคาต่อหน่วย (รวมภาษี)", qty: "จำนวน", subtotal: "ยอดย่อย" },
-    total: (a, c) => `ยอดรวม: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "สินค้า", unit: "ราคาต่อหน่วย", qty: "จำนวน", subtotal: "ยอดย่อย" },
+    total: "ยอดรวม",
     shipTo: "ที่อยู่จัดส่ง",
     name: "ชื่อ",
     phone: "โทร",
@@ -313,8 +347,8 @@ const buyerText: Record<LangKey, {
     orderId: "Mã đơn hàng",
     payment: "Thanh toán",
     buyer: "Người mua",
-    table: { name: "Sản phẩm", unit: "Đơn giá (đã gồm thuế)", qty: "SL", subtotal: "Tạm tính" },
-    total: (a, c) => `Tổng: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "Sản phẩm", unit: "Đơn giá", qty: "SL", subtotal: "Tạm tính" },
+    total: "Tổng",
     shipTo: "Địa chỉ giao hàng",
     name: "Tên",
     phone: "Điện thoại",
@@ -327,8 +361,8 @@ const buyerText: Record<LangKey, {
     orderId: "ID Pesanan",
     payment: "Pembayaran",
     buyer: "Pembeli",
-    table: { name: "Produk", unit: "Harga satuan (termasuk pajak)", qty: "Jml", subtotal: "Subtotal" },
-    total: (a, c) => `Total: ${fmtJPY(a)} (${c.toUpperCase()})`,
+    table: { name: "Produk", unit: "Harga satuan", qty: "Jml", subtotal: "Subtotal" },
+    total: "Total",
     shipTo: "Alamat pengiriman",
     name: "Nama",
     phone: "Telepon",
@@ -337,10 +371,11 @@ const buyerText: Record<LangKey, {
   },
 };
 
-/* -------------------- メールHTML（オーナー：日本語固定） -------------------- */
+/* -------------------- メールHTML（オーナー：日本語固定／購入通貨で表記） -------------------- */
 function buildOwnerHtmlJa(
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
-  items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }>
+  items: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }>,
+  locale = "ja-JP"
 ) {
   const cur = (session.currency || "jpy").toUpperCase();
 
@@ -373,9 +408,9 @@ function buildOwnerHtmlJa(
       const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
       return `<tr>
         <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtJPY(unit)}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(unit, cur, locale)}</td>
         <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtJPY(sub)}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(sub, cur, locale)}</td>
       </tr>`;
     })
     .join("");
@@ -388,13 +423,13 @@ function buildOwnerHtmlJa(
     <table style="border-collapse:collapse;width:100%;max-width:680px;">
       <thead><tr>
         <th style="text-align:left;border-bottom:2px solid #333;">商品名</th>
-        <th style="text-align:right;border-bottom:2px solid #333;">単価（税込）</th>
+        <th style="text-align:right;border-bottom:2px solid #333;">単価</th>
         <th style="text-align:center;border-bottom:2px solid #333;">数量</th>
         <th style="text-align:right;border-bottom:2px solid #333;">小計</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p style="margin-top:12px;">合計: <b>${fmtJPY(total)}</b> (${cur})</p>
+    <p style="margin-top:12px;">合計: <b>${fmtCur(total, cur, locale)}</b></p>
     <h3>お届け先</h3>
     <p>氏名：${name}<br/>電話：${phone}<br/>住所：${addr || "-"}</p>
     <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
@@ -402,7 +437,7 @@ function buildOwnerHtmlJa(
   </div>`;
 }
 
-/* -------------------- メールHTML（購入者：多言語） -------------------- */
+/* -------------------- メールHTML（購入者：多言語／購入通貨で表記） -------------------- */
 function buildBuyerHtmlI18n(
   lang: LangKey,
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
@@ -410,6 +445,7 @@ function buildBuyerHtmlI18n(
 ) {
   const t = buyerText[lang] || buyerText.en;
   const cur = (session.currency || "jpy").toUpperCase();
+  const locale = LOCALE_BY_LANG[lang] || "en";
 
   const ship = (session as any).shipping_details as
     | { name?: string | null; phone?: string | null; address?: Stripe.Address | null }
@@ -440,9 +476,9 @@ function buildBuyerHtmlI18n(
       const sub = typeof it.subtotal === "number" ? it.subtotal : unit * it.qty;
       return `<tr>
         <td style="padding:6px 8px;border-bottom:1px solid #eee;">${it.name}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtJPY(unit)}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(unit, cur, locale)}</td>
         <td style="padding:6px 8px;text-align:center;border-bottom:1px solid #eee;">${it.qty}</td>
-        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtJPY(sub)}</td>
+        <td style="padding:6px 8px;text-align:right;border-bottom:1px solid #eee;">${fmtCur(sub, cur, locale)}</td>
       </tr>`;
     })
     .join("");
@@ -463,7 +499,7 @@ function buildBuyerHtmlI18n(
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p style="margin-top:12px;"><b>${t.total(total, cur)}</b></p>
+      <p style="margin-top:12px;"><b>${t.total}: ${fmtCur(total, cur, locale)}</b></p>
       <h3>${t.shipTo}</h3>
       <p>${t.name}: ${name}<br/>${t.phone}: ${phone}<br/>${t.address}: ${addr || "-"}</p>
       <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
@@ -501,11 +537,22 @@ export async function POST(req: NextRequest) {
   }
 
   const session = event.data.object as Stripe.Checkout.Session & {
-    metadata?: { siteKey?: string; items?: string; uiLang?: string };
+    metadata?: { siteKey?: string; items?: string; lang?: string };
     shipping_details?: ShippingDetails;
   };
 
   try {
+    /* ---------- 0) 決済手段詳細の取得（保存用） ---------- */
+    const pi = await stripe.paymentIntents.retrieve(
+      session.payment_intent as string,
+      { expand: ["latest_charge.payment_method"], ...reqOpts }
+    );
+    const latestCharge = pi.latest_charge as Stripe.Charge | null;
+    const pmDetails = latestCharge?.payment_method_details;
+    const paymentType = pmDetails?.type || null; // 'card' | 'konbini' | 'paypal' など
+    const cardBrand = pmDetails?.card?.brand || null;
+    const last4 = pmDetails?.card?.last4 || null;
+
     /* ---------- 1) Firestore 保存（電話番号も保存） ---------- */
     const itemsFromMeta: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }> =
       session.metadata?.items ? JSON.parse(session.metadata.items) : [];
@@ -515,6 +562,28 @@ export async function POST(req: NextRequest) {
       (session as any).shipping_details?.phone ??
       null;
 
+    // 明細が metadata にない場合は Stripe から取得（購入通貨で major 化）
+    let mailItems: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }> = itemsFromMeta;
+    if (!mailItems.length) {
+      try {
+        const li = await stripe.checkout.sessions.listLineItems(
+          session.id,
+          { expand: ["data.price.product"], limit: 100 },
+          reqOpts
+        );
+        mailItems = li.data.map((x) => {
+          const name = (x.price?.product as Stripe.Product | undefined)?.name || x.description || "Item";
+          const qty = x.quantity || 1;
+          const subMajor = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
+          const unitMajor = subMajor / Math.max(1, qty);
+          return { name, qty, unitAmount: unitMajor, subtotal: subMajor };
+        });
+      } catch (e) {
+        console.warn("⚠️ listLineItems failed, fallback to minimal:", safeErr(e));
+        mailItems = [{ name: "Item", qty: 1, unitAmount: toMajor(session.amount_total, session.currency) }];
+      }
+    }
+
     await adminDb.collection("siteOrders").add({
       siteKey: session.metadata?.siteKey || null,
       createdAt: new Date(),
@@ -522,6 +591,9 @@ export async function POST(req: NextRequest) {
       amount: session.amount_total,
       currency: session.currency,
       payment_status: session.payment_status,
+      payment_type: paymentType,
+      card_brand: cardBrand,
+      card_last4: last4,
       customer: {
         email: session.customer_details?.email ?? null,
         name: session.customer_details?.name ?? (session as any).shipping_details?.name ?? null,
@@ -531,7 +603,7 @@ export async function POST(req: NextRequest) {
           (session as any).shipping_details?.address ??
           null,
       },
-      items: itemsFromMeta,
+      items: mailItems,
     });
 
     /* ---------- 2) siteKey 解決 ---------- */
@@ -574,33 +646,8 @@ export async function POST(req: NextRequest) {
       return new Response("Order saved (no ownerEmail)", { status: 200 });
     }
 
-    /* ---------- 4) メール items 準備 ---------- */
-    let mailItems: Array<{ name: string; qty: number; unitAmount: number; subtotal?: number }> = itemsFromMeta;
-
-    if (!mailItems.length) {
-      try {
-        const li = await stripe.checkout.sessions.listLineItems(
-          session.id,
-          { expand: ["data.price.product"], limit: 100 },
-          reqOpts
-        );
-        // Stripe側の通貨→合計には使うが、行は JPY 固定で表示したい運用ならここでは触らない
-        mailItems = li.data.map((x) => {
-          const name = (x.price?.product as Stripe.Product | undefined)?.name || x.description || "商品";
-          const qty = x.quantity || 1;
-          const subtotalMajor = toMajor(x.amount_subtotal ?? x.amount_total ?? 0, session.currency);
-          const unit = subtotalMajor / Math.max(1, qty);
-          // 行の JPY 表示が不要なら unit/subtotal を Stripe通貨で出す運用に変更可能
-          return { name, qty, unitAmount: unit, subtotal: subtotalMajor };
-        });
-      } catch (e) {
-        console.warn("⚠️ listLineItems failed, fallback to minimal:", safeErr(e));
-        mailItems = [{ name: "（明細の取得に失敗）", qty: 1, unitAmount: toMajor(session.amount_total, session.currency) }];
-      }
-    }
-
-    /* ---------- 5) 送信：オーナー（日本語固定） ---------- */
-    const ownerHtml = buildOwnerHtmlJa(session, mailItems);
+    /* ---------- 4) 送信：オーナー（日本語固定／購入通貨表記） ---------- */
+    const ownerHtml = buildOwnerHtmlJa(session, mailItems, "ja-JP");
     try {
       await sendMail({
         to: ownerEmail,
@@ -626,13 +673,13 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    /* ---------- 6) 送信：購入者（多言語） ---------- */
+    /* ---------- 5) 送信：購入者（metadata.lang 優先／購入通貨表記） ---------- */
     try {
       const buyerEmail =
         session.customer_details?.email || session.customer_email || null;
       if (buyerEmail) {
-        // 言語優先度: metadata.uiLang → session.locale → en
-        const resolvedLang = normalizeLang(session.metadata?.uiLang || (session.locale as string) || "en");
+        // 言語優先度: metadata.lang → session.locale → 'en'
+        const resolvedLang = normalizeLang(session.metadata?.lang || (session.locale as string) || "en");
         const buyerMail = buildBuyerHtmlI18n(resolvedLang, session, mailItems);
         await sendMail({
           to: buyerEmail,

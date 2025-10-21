@@ -22,7 +22,7 @@ type ShippingDetails = {
   phone?: string | null;
 };
 
-const PAYOUT_HOLD_MINUTES = 5;
+const PAYOUT_HOLD_MINUTES = 3;
 const ZERO_DEC = new Set([
   "bif",
   "clp",

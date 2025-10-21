@@ -99,6 +99,16 @@ type TransferLog = {
   timestamp?: Date | Timestamp;
 };
 
+ /* ───────── 料金系 ───────── */
+  const UNPAID_STATUSES: PaymentStatus[] = [
+    "none",
+    "canceled",
+    "past_due",
+    "incomplete",
+    "incomplete_expired",
+    "unpaid",
+  ];
+
 /* ───────── ヘルパー ───────── */
 function toJSDate(t?: Date | Timestamp): Date | undefined {
   if (!t) return undefined;
@@ -251,15 +261,7 @@ export default function SiteListPage() {
     return () => unsub();
   }, [router]);
 
-  /* ───────── 料金系 ───────── */
-  const UNPAID_STATUSES: PaymentStatus[] = [
-    "none",
-    "canceled",
-    "past_due",
-    "incomplete",
-    "incomplete_expired",
-    "unpaid",
-  ];
+
 
   const paidCount = useMemo(
     () =>

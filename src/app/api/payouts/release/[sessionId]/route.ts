@@ -1,16 +1,16 @@
 // app/api/payouts/release/[sessionId]/route.ts
-import { NextRequest } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { stripeConnect } from "@/lib/stripe-connect";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function POST(
-  req: NextRequest,
-  { params }: { params: { sessionId: string } }
-) {
-  const { sessionId } = params;
+export async function POST(req: Request) {
+  // ← ルートの第2引数は使わず、URL から動的セグメントを取得
+  const url = new URL(req.url);
+  const parts = url.pathname.split("/");
+  const sessionId = decodeURIComponent(parts[parts.length - 1] || "");
+  if (!sessionId) return new Response("sessionId missing", { status: 400 });
 
   // 1) エスクロー取得
   const ref = adminDb.collection("escrows").doc(sessionId);
@@ -21,7 +21,7 @@ export async function POST(
     siteKey?: string | null;
     status: string;
     currency: string;
-    sellerAmount: number;           // 最小通貨単位
+    sellerAmount: number; // 最小通貨単位
     sellerConnectId: string | null;
     transferGroup?: string | null;
     releaseAt?: FirebaseFirestore.Timestamp | Date | number | null;
@@ -35,15 +35,14 @@ export async function POST(
   }
 
   // 3) 期日チェック（?force=1 で強制解放可）
-  const url = new URL(req.url);
   const force = url.searchParams.get("force") === "1";
   const nowMs = Date.now();
   const relMs =
     e.releaseAt instanceof Date
       ? e.releaseAt.getTime()
       : typeof e.releaseAt === "number"
-        ? e.releaseAt
-        : (e.releaseAt as any)?.toDate?.()?.getTime?.() ?? 0;
+      ? e.releaseAt
+      : (e.releaseAt as any)?.toDate?.()?.getTime?.() ?? 0;
 
   if (!force && relMs && relMs > nowMs) {
     return new Response("not yet releasable", { status: 400 });
@@ -57,7 +56,7 @@ export async function POST(
     return new Response("amount invalid", { status: 400 });
   }
 
-  // 5) 🔒 送金停止ガード（ここがご提示のコード）
+  // 5) 🔒 送金停止ガード
   const siteKey = (e as any).siteKey || null;
   if (siteKey) {
     const sDoc = await adminDb.doc(`siteSellers/${siteKey}`).get();

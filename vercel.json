@@ -1,5 +1,9 @@
 {
+  "version": 2,
   "crons": [
-    { "path": "/api/payouts/cron?key=pageitAdminSecret_ThisShouldBeLongAndRandom_9Jp0xKf2uWv", "schedule": "* * * * *" }
+    {
+      "path": "/api/payouts/cron?key=pageitAdminSecret_ThisShouldBeLongAndRandom_9Jp0xKf2uWv",
+      "schedule": "0 9 * * *"
+    }
   ]
 }

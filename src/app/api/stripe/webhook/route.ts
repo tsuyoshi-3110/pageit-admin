@@ -22,6 +22,7 @@ type ShippingDetails = {
   phone?: string | null;
 };
 
+const PAYOUT_HOLD_MINUTES = 5;
 const ZERO_DEC = new Set([
   "bif",
   "clp",
@@ -1008,9 +1009,69 @@ export async function POST(req: NextRequest) {
         .set({ stripeCustomerId: customerIdResolved }, { merge: true });
     }
 
+    // async function getHoldDays(): Promise<number> {
+    //   try {
+    //     // UI と同じ保存先を優先
+    //     const g = await adminDb.doc("adminSettings/global").get();
+    //     const v = Number(g.get("payoutHoldDays"));
+    //     if (Number.isFinite(v) && v >= 0) return v;
+    //   } catch {}
+    //   try {
+    //     // 旧設定のフォールバック（残しておくと安全）
+    //     const p = await adminDb.doc("platformConfig/payouts").get();
+    //     const n = Number(p.get("holdDays"));
+    //     if (Number.isFinite(n) && n >= 0) return n;
+    //   } catch {}
+    //   return 30; // 最終フォールバック
+    // }
+
+    async function resolveHoldMs(siteKey: string | null): Promise<number> {
+      // 1) サイト個別上書き（分・秒）
+      try {
+        if (siteKey) {
+          const s = await adminDb.doc(`siteSellers/${siteKey}`).get();
+          const min = Number(s.get("testHoldMinutes"));
+          if (Number.isFinite(min) && min >= 0) return min * 60 * 1000;
+          const sec = Number(s.get("testHoldSeconds"));
+          if (Number.isFinite(sec) && sec >= 0) return sec * 1000;
+        }
+      } catch {}
+
+      // 2) 全体上書き（adminSettings/global）
+      try {
+        const g = await adminDb.doc("adminSettings/global").get();
+        const min = Number(g.get("payoutHoldMinutes"));
+        if (Number.isFinite(min) && min >= 0) return min * 60 * 1000;
+        const sec = Number(g.get("payoutHoldSeconds"));
+        if (Number.isFinite(sec) && sec >= 0) return sec * 1000;
+
+        const days = Number(g.get("payoutHoldDays"));
+        if (Number.isFinite(days) && days >= 0)
+          return days * 24 * 60 * 60 * 1000;
+      } catch {}
+
+      // 3) 旧レガシー場所（互換）
+      try {
+        const p = await adminDb.doc("platformConfig/payouts").get();
+        const days = Number(p.get("holdDays"));
+        if (Number.isFinite(days) && days >= 0)
+          return days * 24 * 60 * 60 * 1000;
+      } catch {}
+
+      // 4) 環境変数
+      const envMin = Number(PAYOUT_HOLD_MINUTES);
+      if (Number.isFinite(envMin) && envMin >= 0) return envMin * 60 * 1000;
+
+      // 5) デフォルト 30日
+      return 30 * 24 * 60 * 60 * 1000;
+    }
+
     /* G) 🔸 エスクロー記録（SCT: 後日 transfer 解放用） */
     const DEFAULT_PLATFORM_FEE_RATE = 0.07;
-    const RELEASE_DAYS = 30;
+    // const holdDays = await getHoldDays();
+    const holdMs = await resolveHoldMs(siteKey || null);
+    const now = new Date();
+    const releaseAt = new Date(now.getTime() + holdMs);
 
     const transferGroup = session.metadata?.transferGroup || null;
     const sellerConnectIdEscrow =
@@ -1025,10 +1086,8 @@ export async function POST(req: NextRequest) {
     const sellerAmount = Math.max(0, gross - platformFee);
 
     const currency = (session.currency || "jpy").toLowerCase();
-    const now = new Date();
-    const releaseAt = new Date(
-      now.getTime() + RELEASE_DAYS * 24 * 60 * 60 * 1000
-    );
+    // const now = new Date();
+    // const releaseAt = new Date(now.getTime() + holdDays * 24 * 60 * 60 * 1000);
 
     const chargeId =
       (pi?.latest_charge as Stripe.Charge | undefined)?.id || null;

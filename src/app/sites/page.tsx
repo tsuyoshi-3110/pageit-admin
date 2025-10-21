@@ -6,12 +6,13 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   getDocs,
   query,
   Timestamp,
   updateDoc,
   where,
-  setDoc, // ← 追加
+  setDoc,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
@@ -83,13 +84,9 @@ type Site = {
   paymentStatus?: PaymentStatus;
   setupMode?: boolean;
   isFreePlan?: boolean;
-
-  // 業種
   industry?: { key: string; name: string };
-
-  // ロゴ（どちらかがあればOK）
-  headerLogoUrl?: string; // 文字列URL
-  headerLogo?: string | { url?: string }; // 文字列 or { url }
+  headerLogoUrl?: string;
+  headerLogo?: string | { url?: string };
 };
 
 type TransferLog = {
@@ -162,10 +159,14 @@ export default function SiteListPage() {
     Map<string, boolean>
   >(new Map());
 
-  // ⬇ 送金停止トグル状態（siteSellers/{siteKey}.payoutsSuspended）
+  // 送金停止トグル（siteSellers/{siteKey}.payoutsSuspended）
   const [payoutsSuspendedMap, setPayoutsSuspendedMap] = useState<
     Map<string, boolean>
   >(new Map());
+
+  // 🔧 エスクロー保留日数（全サイト共通・管理画面で編集）
+  const [holdDays, setHoldDays] = useState<number | null>(null);
+  const [savingHold, setSavingHold] = useState(false);
 
   const setOwnerName = useSetAtom(invOwnerNameAtom);
   const setInvEmail = useSetAtom(invEmailAtom);
@@ -188,7 +189,7 @@ export default function SiteListPage() {
           getDocs(collection(db, "siteSettingsEditable")).catch(() => null),
         ]);
 
-        // editable 側のロゴ情報を map 化（key は doc.id 優先、無ければ data.siteKey）
+        // editable 側のロゴ情報を map 化
         const editsLogoMap = new Map<
           string,
           { headerLogoUrl?: string; headerLogo?: string | { url?: string } }
@@ -243,7 +244,7 @@ export default function SiteListPage() {
         const logs = await fetchTransferLogs();
         setTransferLogMap(mapTransferLogsByEmail(logs));
 
-        // ⬇ 送金停止トグルの読み込み（siteSellers）
+        // 送金停止トグルの読み込み（siteSellers）
         const sellersSnap = await getDocs(collection(db, "siteSellers")).catch(
           () => null
         );
@@ -253,6 +254,12 @@ export default function SiteListPage() {
           pMap.set(d.id, data?.payoutsSuspended === true);
         });
         setPayoutsSuspendedMap(pMap);
+
+        // 🔧 グローバル保留日数の読込
+        const gSnap = await getDoc(doc(db, "adminSettings", "global"));
+        const v = Number(gSnap.data()?.payoutHoldDays ?? 30);
+        const clamped = Number.isFinite(v) ? Math.max(0, Math.min(90, v)) : 30;
+        setHoldDays(clamped);
       } finally {
         setLoading(false);
       }
@@ -317,34 +324,7 @@ export default function SiteListPage() {
     })
     .sort((a, b) => (a.ownerName ?? "").localeCompare(b.ownerName ?? "", "ja"));
 
-  /* ───────── 小物関数（コンポーネント内に置く） ───────── */
-  const renderSetupModeToggle = (
-    siteId: string,
-    current: boolean | undefined
-  ) => {
-    const toggleSetup = async () => {
-      const newVal = !current;
-      await updateDoc(doc(db, "siteSettings", siteId), {
-        setupMode: newVal,
-        updatedAt: Timestamp.now(),
-      });
-      setSites((prev) =>
-        prev.map((s) => (s.id === siteId ? { ...s, setupMode: newVal } : s))
-      );
-    };
-
-    return (
-      <Button
-        className="cursor-pointer"
-        variant={current ? "default" : "outline"}
-        size="sm"
-        onClick={toggleSetup}
-      >
-        {current ? "✅ セットアップ中" : "セットアップモードにする"}
-      </Button>
-    );
-  };
-
+  /* ───────── 小物関数 ───────── */
   const fetchCredentialsSentLogs = async () => {
     const snap = await getDocs(collection(db, "credentialsSentLogs"));
     const map = new Map<string, boolean>();
@@ -408,159 +388,7 @@ export default function SiteListPage() {
     nextRouter.push(`/send-transfer`);
   };
 
-  const renderTransferStatus = (
-    email: string | undefined,
-    map: Map<string, { collected: boolean; lastSentAt?: Date }>,
-    onClick: (email: string) => void
-  ) => {
-    if (!email) return null;
-    const info = map.get(email);
-    if (!info) return null;
-
-    return (
-      <div className="flex items-center gap-2">
-        {info.collected ? (
-          <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded text-xs font-medium">
-            <CheckCircle2 size={14} />
-            集金済み
-          </span>
-        ) : (
-          <Button
-            className="cursor-pointer"
-            size="sm"
-            variant="outline"
-            onClick={() => onClick(email)}
-          >
-            💰 集金確認
-          </Button>
-        )}
-
-        {info.lastSentAt && !info.collected && (
-          <span
-            className="inline-flex items-center gap-1 text-violet-700 bg-violet-100 px-2 py-0.5 rounded text-xs font-medium"
-            title={`最終送信日：${formatYMD(info.lastSentAt)}`}
-          >
-            📅 送信 {daysAgoString(info.lastSentAt)}
-          </span>
-        )}
-      </div>
-    );
-  };
-
-  // ✅ ログイン情報送信ステータス
-  const renderCredentialsStatus = (
-    email: string | undefined,
-    isFreePlan: boolean,
-    paymentStatus: PaymentStatus | undefined
-  ) => {
-    if (!email) return null;
-
-    const isSent = credentialsSentMap.get(email) === true;
-    const isPaidPlan =
-      paymentStatus === "active" || paymentStatus === "pending_cancel";
-
-    // 無料プラン＝常に表示 / 有料プラン＝集金済みのみ表示
-    const isCollected = transferLogMap.get(email)?.collected === true;
-    if (!isFreePlan && !(isPaidPlan && isCollected)) return null;
-
-    return (
-      <div className="flex items-center gap-2">
-        {isSent && (
-          <span className="inline-flex items-center gap-1 text-blue-700 bg-blue-100 px-2 py-0.5 rounded text-xs font-medium">
-            <Mail size={14} />
-            ログイン情報送信済み
-          </span>
-        )}
-        <Button
-          className="cursor-pointer"
-          size="sm"
-          variant="default"
-          onClick={() => handleSendCredentials(email)}
-        >
-          <Mail className="mr-1.5 h-4 w-4" />
-          ログイン情報送信
-        </Button>
-      </div>
-    );
-  };
-
-  const handleSave = async (siteId: string) => {
-    await updateDoc(doc(db, "siteSettings", siteId), {
-      homepageUrl: homepageInput,
-      updatedAt: Timestamp.now(),
-    });
-    setSites((prev) =>
-      prev.map((s) =>
-        s.id === siteId ? { ...s, homepageUrl: homepageInput } : s
-      )
-    );
-    setEditingId(null);
-    setHomepageInput("");
-  };
-
-  const handleCancel = async (siteId: string) => {
-    if (!confirm("本当に解約しますか？次回請求以降課金されません。")) return;
-    const res = await fetch("/api/stripe/cancel-subscription", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ siteKey: siteId }),
-    });
-    if (!res.ok) return alert("解約に失敗しました");
-    setSites((p) =>
-      p.map((s) => (s.id === siteId ? { ...s, cancelPending: true } : s))
-    );
-  };
-
-  const handleDelete = async (siteId: string) => {
-    if (!confirm("本当にこのサイトを削除しますか？この操作は取り消せません。"))
-      return;
-    try {
-      await deleteDoc(doc(db, "siteSettings", siteId));
-      setSites((prev) => prev.filter((s) => s.id !== siteId));
-    } catch (error) {
-      console.error("削除エラー:", error);
-      alert("削除に失敗しました。");
-    }
-  };
-
-  const handleUpdateInfo = async (siteId: string) => {
-    const industryName =
-      editIndustryKey === "other"
-        ? editIndustryOther.trim()
-        : INDUSTRY_OPTIONS.find((o) => o.value === editIndustryKey)?.label ||
-          "";
-
-    await updateDoc(doc(db, "siteSettings", siteId), {
-      siteName: editSiteName,
-      ownerName: editOwnerName,
-      ownerPhone: editOwnerPhone,
-      ownerAddress: editOwnerAddress,
-      industry: editIndustryKey
-        ? { key: editIndustryKey, name: industryName }
-        : null,
-      updatedAt: Timestamp.now(),
-    });
-
-    setSites((prev) =>
-      prev.map((s) =>
-        s.id === siteId
-          ? {
-              ...s,
-              siteName: editSiteName,
-              ownerName: editOwnerName,
-              ownerPhone: editOwnerPhone,
-              ownerAddress: editOwnerAddress,
-              industry: editIndustryKey
-                ? { key: editIndustryKey, name: industryName }
-                : undefined,
-            }
-          : s
-      )
-    );
-    setEditingInfoId(null);
-  };
-
-  // ⬇ 送金停止トグルの更新
+  // 既存: 送金停止トグルの更新（再送に戻したら期日分を即時送金）
   const handleTogglePayouts = async (siteId: string, next: boolean) => {
     await setDoc(
       doc(db, "siteSellers", siteId),
@@ -568,6 +396,52 @@ export default function SiteListPage() {
       { merge: true }
     );
     setPayoutsSuspendedMap((prev) => new Map(prev.set(siteId, next)));
+
+    if (!next) {
+      try {
+        const res = await fetch("/api/payouts/release-site", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ siteKey: siteId, force: false, limit: 100 }),
+        });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          alert(`期日分の即時送金に失敗しました (${res.status})`);
+          return;
+        }
+        alert(
+          `期日分を即時送金：${j.released ?? 0} 件（スキップ ${
+            j.skipped ?? 0
+          }, 失敗 ${j.failed ?? 0}）`
+        );
+      } catch (e) {
+        alert(`期日分の即時送金APIエラー: ${String(e)}`);
+      }
+    }
+  };
+
+  // 🔸 送金API（force: true=期日前も含め全額 / false=期日到来分のみ）
+  const handleReleasePayouts = async (siteId: string, force = true) => {
+    try {
+      const res = await fetch("/api/payouts/release-site", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ siteKey: siteId, force, limit: 50 }),
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => "");
+        alert(`送金に失敗しました (${res.status})\n${t}`);
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      alert(
+        `送金完了: ${data.released ?? 0} 件 / スキップ ${
+          data.skipped ?? 0
+        } 件 / 失敗 ${data.failed ?? 0} 件`
+      );
+    } catch (e) {
+      alert(`送金APIエラー: ${String(e)}`);
+    }
   };
 
   const badgeBtn = (
@@ -580,26 +454,116 @@ export default function SiteListPage() {
       active ? activeClasses : baseClasses
     );
 
-  const handleReleasePayouts = async (siteId: string, force = true) => {
+  // --- ここから: 4つのハンドラを SiteListPage() の中に追加（return より上） ---
+
+  function handleSave(siteId: string) {
+    return updateDoc(doc(db, "siteSettings", siteId), {
+      homepageUrl: homepageInput,
+      updatedAt: Timestamp.now(),
+    })
+      .then(() => {
+        setSites((prev) =>
+          prev.map((s) =>
+            s.id === siteId ? { ...s, homepageUrl: homepageInput } : s
+          )
+        );
+        setEditingId(null);
+        setHomepageInput("");
+      })
+      .catch((e) => {
+        console.error("handleSave error:", e);
+        alert("URLの保存に失敗しました。");
+      });
+  }
+
+  async function handleCancel(siteId: string) {
+    if (!confirm("本当に解約しますか？次回請求以降課金されません。")) return;
     try {
-      const res = await fetch("/api/payouts/release-site", {
+      const res = await fetch("/api/stripe/cancel-subscription", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ siteKey: siteId, force, limit: 50 }), // 必要なら件数調整
+        body: JSON.stringify({ siteKey: siteId }),
       });
-      if (!res.ok) {
-        const t = await res.text().catch(() => "");
-        alert(`送金に失敗しました (${res.status})\n${t}`);
-        return;
-      }
-      const data = await res.json().catch(() => ({}));
-      alert(
-        `送金完了: ${data.released ?? 0} 件 / スキップ ${data.skipped ?? 0} 件`
+      if (!res.ok) throw new Error(await res.text());
+      setSites((p) =>
+        p.map((s) => (s.id === siteId ? { ...s, cancelPending: true } : s))
       );
     } catch (e) {
-      alert(`送金APIエラー: ${String(e)}`);
+      console.error("handleCancel error:", e);
+      alert("解約に失敗しました。");
     }
-  };
+  }
+
+  async function handleDelete(siteId: string) {
+    if (!confirm("本当にこのサイトを削除しますか？この操作は取り消せません。"))
+      return;
+    try {
+      await deleteDoc(doc(db, "siteSettings", siteId));
+      setSites((prev) => prev.filter((s) => s.id !== siteId));
+    } catch (e) {
+      console.error("handleDelete error:", e);
+      alert("削除に失敗しました。");
+    }
+  }
+
+  async function handleUpdateInfo(siteId: string) {
+    const INDUSTRY_OPTIONS: { value: string; label: string }[] = [
+      { value: "food", label: "飲食" },
+      { value: "retail", label: "小売" },
+      { value: "beauty", label: "美容・サロン" },
+      { value: "medical", label: "医療・介護" },
+      { value: "construction", label: "建設・不動産" },
+      { value: "it", label: "IT・ソフトウェア" },
+      { value: "education", label: "教育・スクール" },
+      { value: "logistics", label: "物流・運輸" },
+      { value: "manufacturing", label: "製造" },
+      { value: "professional", label: "士業" },
+      { value: "service", label: "サービス" },
+      { value: "other", label: "その他" },
+    ];
+
+    const industryName =
+      editIndustryKey === "other"
+        ? editIndustryOther.trim()
+        : INDUSTRY_OPTIONS.find((o) => o.value === editIndustryKey)?.label ||
+          "";
+
+    try {
+      await updateDoc(doc(db, "siteSettings", siteId), {
+        siteName: editSiteName,
+        ownerName: editOwnerName,
+        ownerPhone: editOwnerPhone,
+        ownerAddress: editOwnerAddress,
+        industry: editIndustryKey
+          ? { key: editIndustryKey, name: industryName }
+          : null,
+        updatedAt: Timestamp.now(),
+      });
+
+      setSites((prev) =>
+        prev.map((s) =>
+          s.id === siteId
+            ? {
+                ...s,
+                siteName: editSiteName,
+                ownerName: editOwnerName,
+                ownerPhone: editOwnerPhone,
+                ownerAddress: editOwnerAddress,
+                industry: editIndustryKey
+                  ? { key: editIndustryKey, name: industryName }
+                  : undefined,
+              }
+            : s
+        )
+      );
+      setEditingInfoId(null);
+    } catch (e) {
+      console.error("handleUpdateInfo error:", e);
+      alert("保存に失敗しました。");
+    }
+  }
+
+  // --- ここまで: 4つのハンドラ ---
 
   /* ───────── Render ───────── */
   return (
@@ -694,6 +658,47 @@ export default function SiteListPage() {
         </div>
       </Card>
 
+      {/* 🔧 エスクロー保留日数の設定カード（全サイト共通） */}
+      <Card className="p-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="font-medium">エスクロー保留日数（全サイト共通）</div>
+          <Input
+            type="number"
+            min={0}
+            max={90}
+            className="w-28 text-right pr-2"
+            value={holdDays ?? ""}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              setHoldDays(Number.isFinite(n) ? n : 0);
+            }}
+          />
+          <Button
+            disabled={holdDays === null || savingHold}
+            onClick={async () => {
+              if (holdDays === null) return;
+              setSavingHold(true);
+              try {
+                const clamped = Math.max(0, Math.min(90, Math.floor(holdDays)));
+                await setDoc(
+                  doc(db, "adminSettings", "global"),
+                  { payoutHoldDays: clamped, updatedAt: Timestamp.now() },
+                  { merge: true }
+                );
+                alert("保留日数を保存しました（新規決済から適用）");
+              } finally {
+                setSavingHold(false);
+              }
+            }}
+          >
+            {savingHold ? "保存中..." : "保存"}
+          </Button>
+          <div className="text-xs text-gray-500">
+            ※既存の保留中エスクローには影響しません（releaseAt 固定）。
+          </div>
+        </div>
+      </Card>
+
       {loading && (
         <div className="flex justify-center items-start min-h-[40vh] pt-16">
           <Loader2 className="h-10 w-10 animate-spin text-muted-foreground" />
@@ -726,7 +731,6 @@ export default function SiteListPage() {
               : "") ||
             "-";
 
-          // ロゴURLを決定
           const logoSrc =
             site.headerLogoUrl ||
             (typeof site.headerLogo === "object"
@@ -737,7 +741,6 @@ export default function SiteListPage() {
               : undefined) ||
             null;
 
-          // ⬇ 販売者ドキュメント有無と停止状態を判定
           const hasSeller = payoutsSuspendedMap.has(site.id);
           const suspended =
             hasSeller && payoutsSuspendedMap.get(site.id) === true;
@@ -784,7 +787,7 @@ export default function SiteListPage() {
                   />
                   <Input value={site.ownerEmail ?? ""} disabled />
 
-                  {/* 業種（RegisterPageと同じUI） */}
+                  {/* 業種 */}
                   <div className="space-y-2 pt-1">
                     <label className="text-sm text-gray-700">業種</label>
                     <select
@@ -847,7 +850,7 @@ export default function SiteListPage() {
                           無料
                         </span>
                       )}
-                      {/* ⬇ EC バッジ（siteSellers にドキュメントがある場合のみ） */}
+                      {/* EC バッジ（siteSellers にドキュメントがある場合のみ） */}
                       {hasSeller && (
                         <span className="px-2 py-0.5 text-xs rounded bg-violet-600 text-white">
                           EC
@@ -865,16 +868,7 @@ export default function SiteListPage() {
                           送金停止中
                         </span>
                       )}
-                      {hasSeller && (
-                        <Button
-                          className="cursor-pointer"
-                          size="sm"
-                          variant="default"
-                          onClick={() => handleReleasePayouts(site.id, true)} // 期限前でも送金するなら true
-                        >
-                          送金する
-                        </Button>
-                      )}
+
                       {isPending && (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-yellow-500 text-white">
                           解約予約
@@ -947,30 +941,89 @@ export default function SiteListPage() {
 
                   {/* 集金/ログイン情報 */}
                   <div className="mt-2 flex flex-wrap items-center gap-2">
-                    {renderTransferStatus(
-                      site.ownerEmail,
-                      transferLogMap,
-                      async (email) => {
-                        await updateCollectedStatus(email);
-                        setTransferLogMap(
-                          (prev) =>
-                            new Map(
-                              prev.set(email, {
-                                ...(prev.get(email) ?? {
-                                  lastSentAt: undefined,
-                                }),
-                                collected: true,
-                              })
-                            )
+                    {/* 集金ログ表示 */}
+                    <div className="flex items-center gap-2">
+                      {(() => {
+                        const email = site.ownerEmail;
+                        if (!email) return null;
+                        const info = transferLogMap.get(email);
+                        if (!info) return null;
+                        return (
+                          <>
+                            {info.collected ? (
+                              <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded text-xs font-medium">
+                                <CheckCircle2 size={14} />
+                                集金済み
+                              </span>
+                            ) : (
+                              <Button
+                                className="cursor-pointer"
+                                size="sm"
+                                variant="outline"
+                                onClick={async () => {
+                                  await updateCollectedStatus(email);
+                                  setTransferLogMap((prev) => {
+                                    const next = new Map(prev);
+                                    const cur = next.get(email);
+                                    next.set(email, {
+                                      ...(cur ?? {}),
+                                      collected: true,
+                                    });
+                                    return next;
+                                  });
+                                }}
+                              >
+                                💰 集金確認
+                              </Button>
+                            )}
+                            {info.lastSentAt && !info.collected && (
+                              <span
+                                className="inline-flex items-center gap-1 text-violet-700 bg-violet-100 px-2 py-0.5 rounded text-xs font-medium"
+                                title={`最終送信日：${formatYMD(
+                                  info.lastSentAt
+                                )}`}
+                              >
+                                📅 送信 {daysAgoString(info.lastSentAt)}
+                              </span>
+                            )}
+                          </>
                         );
-                      }
-                    )}
+                      })()}
+                    </div>
 
-                    {renderCredentialsStatus(
-                      site.ownerEmail,
-                      !!site.isFreePlan,
-                      site.paymentStatus
-                    )}
+                    {/* ログイン情報送信 */}
+                    {(() => {
+                      const email = site.ownerEmail;
+                      if (!email) return null;
+                      const isSent = credentialsSentMap.get(email) === true;
+                      const isPaidPlan =
+                        site.paymentStatus === "active" ||
+                        site.paymentStatus === "pending_cancel";
+                      const isCollected =
+                        transferLogMap.get(email)?.collected === true;
+                      if (!site.isFreePlan && !(isPaidPlan && isCollected))
+                        return null;
+
+                      return (
+                        <div className="flex items-center gap-2">
+                          {isSent && (
+                            <span className="inline-flex items-center gap-1 text-blue-700 bg-blue-100 px-2 py-0.5 rounded text-xs font-medium">
+                              <Mail size={14} />
+                              ログイン情報送信済み
+                            </span>
+                          )}
+                          <Button
+                            className="cursor-pointer"
+                            size="sm"
+                            variant="default"
+                            onClick={() => handleSendCredentials(email)}
+                          >
+                            <Mail className="mr-1.5 h-4 w-4" />
+                            ログイン情報送信
+                          </Button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </>
               )}
@@ -1031,40 +1084,30 @@ export default function SiteListPage() {
                     {site.homepageUrl ? "✏️ URLを編集" : "＋ URLを追加"}
                   </Button>
 
-                  {renderSetupModeToggle(site.id, site.setupMode)}
-
+                  {/* セットアップモード */}
                   <Button
-                    className="cursor-pointer bg-orange-500 hover:bg-orange-600 text-white focus-visible:ring-2 focus-visible:ring-orange-500"
+                    className="cursor-pointer"
+                    variant={site.setupMode ? "default" : "outline"}
                     size="sm"
-                    variant="default"
-                    onClick={() => {
-                      setEditingInfoId(site.id);
-                      setEditSiteName(site.siteName);
-                      setEditOwnerName(site.ownerName);
-                      setEditOwnerPhone(site.ownerPhone);
-                      setEditOwnerAddress(site.ownerAddress ?? "");
-                      const k = site.industry?.key ?? "";
-                      setEditIndustryKey(k);
-                      setEditIndustryOther(
-                        k === "other" ? site.industry?.name ?? "" : ""
+                    onClick={async () => {
+                      const newVal = !site.setupMode;
+                      await updateDoc(doc(db, "siteSettings", site.id), {
+                        setupMode: newVal,
+                        updatedAt: Timestamp.now(),
+                      });
+                      setSites((prev) =>
+                        prev.map((s) =>
+                          s.id === site.id ? { ...s, setupMode: newVal } : s
+                        )
                       );
                     }}
                   >
-                    ✏ オーナー情報を編集
+                    {site.setupMode
+                      ? "✅ セットアップ中"
+                      : "セットアップモードにする"}
                   </Button>
 
-                  {/* ⬇ 送金停止 / 再送 トグル（siteSellers にドキュメントがある場合のみ表示） */}
-                  {hasSeller && (
-                    <Button
-                      className="cursor-pointer"
-                      size="sm"
-                      variant={suspended ? "default" : "outline"}
-                      onClick={() => handleTogglePayouts(site.id, !suspended)}
-                    >
-                      {suspended ? "再送" : "送金停止"}
-                    </Button>
-                  )}
-
+                  {/* サブスク解約 */}
                   {isPaid && !isPending && (
                     <Button
                       className="cursor-pointer"
@@ -1076,6 +1119,7 @@ export default function SiteListPage() {
                     </Button>
                   )}
 
+                  {/* Firestore 削除 */}
                   <Button
                     className="cursor-pointer"
                     size="sm"
@@ -1085,6 +1129,7 @@ export default function SiteListPage() {
                     firebaseアカウント削除
                   </Button>
 
+                  {/* 請求書送信（未契約のみ） */}
                   {site.paymentStatus === "none" &&
                     !site.isFreePlan &&
                     site.ownerEmail && (
@@ -1102,6 +1147,48 @@ export default function SiteListPage() {
                         📩 請求書送信
                       </Button>
                     )}
+                </div>
+              )}
+
+              {/* 送金操作ブロック（常に横並び） */}
+              {hasSeller && (
+                <div className="mt-3 inline-flex items-center gap-2 whitespace-nowrap">
+                  <Button
+                    className="cursor-pointer shrink-0"
+                    size="sm"
+                    variant={suspended ? "default" : "outline"}
+                    onClick={() => handleTogglePayouts(site.id, !suspended)}
+                  >
+                    {suspended ? "再送" : "送金停止"}
+                  </Button>
+
+                  <Button
+                    className="cursor-pointer shrink-0"
+                    size="sm"
+                    variant="outline"
+                    title="期日到来分のみ送金"
+                    onClick={() => handleReleasePayouts(site.id, false)}
+                  >
+                    期日分を送金
+                  </Button>
+
+                  <Button
+                    className="cursor-pointer shrink-0"
+                    size="sm"
+                    variant="default"
+                    title="保留中をすべて送金（期日前を含む）"
+                    onClick={() => {
+                      if (
+                        confirm(
+                          "期日前の保留分も含めて送金します。よろしいですか？"
+                        )
+                      ) {
+                        handleReleasePayouts(site.id, true);
+                      }
+                    }}
+                  >
+                    送金する（全額）
+                  </Button>
                 </div>
               )}
             </Card>

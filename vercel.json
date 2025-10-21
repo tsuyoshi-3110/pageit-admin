@@ -1,0 +1,5 @@
+{
+  "crons": [
+    { "path": "/api/payouts/cron?key=pageitAdminSecret_ThisShouldBeLongAndRandom_9Jp0xKf2uWv", "schedule": "* * * * *" }
+  ]
+}

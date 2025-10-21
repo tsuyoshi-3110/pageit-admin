@@ -765,7 +765,14 @@ export async function POST(req: NextRequest) {
     : undefined;
 
   const session = event.data.object as Stripe.Checkout.Session & {
-    metadata?: { siteKey?: string; lang?: string; uiLang?: string; transferGroup?: string; sellerConnectId?: string; platformFeePct?: string };
+    metadata?: {
+      siteKey?: string;
+      lang?: string;
+      uiLang?: string;
+      transferGroup?: string;
+      sellerConnectId?: string;
+      platformFeePct?: string;
+    };
     shipping_details?: ShippingDetails;
   };
 
@@ -1019,21 +1026,32 @@ export async function POST(req: NextRequest) {
 
     const currency = (session.currency || "jpy").toLowerCase();
     const now = new Date();
-    const releaseAt = new Date(now.getTime() + RELEASE_DAYS * 24 * 60 * 60 * 1000);
+    const releaseAt = new Date(
+      now.getTime() + RELEASE_DAYS * 24 * 60 * 60 * 1000
+    );
 
-    await adminDb.collection("escrows").doc(session.id).set({
-      siteKey: siteKey || null,
-      sessionId: session.id,
-      currency,
-      gross,
-      platformFee,
-      sellerAmount,
-      sellerConnectId: sellerConnectIdEscrow,
-      transferGroup,
-      status: "holding",
-      createdAt: now,
-      releaseAt,
-    });
+    const chargeId =
+      (pi?.latest_charge as Stripe.Charge | undefined)?.id || null;
+
+    await adminDb
+      .collection("escrows")
+      .doc(session.id)
+      .set({
+        siteKey: siteKey || null,
+        sessionId: session.id,
+        currency,
+        gross,
+        platformFee,
+        sellerAmount,
+        sellerConnectId: sellerConnectIdEscrow,
+        transferGroup,
+        status: "held", // ← 'held' に統一（API側のクエリと合わせる）
+        paymentIntentId: pi?.id || null,
+        chargeId, // ← pending資金でも送れるよう保存（超重要）
+        manualHold: false, // ← 明示
+        createdAt: now,
+        releaseAt,
+      });
 
     /* H) オーナー宛（日本語固定） */
     if (siteKey) {

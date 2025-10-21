@@ -99,15 +99,15 @@ type TransferLog = {
   timestamp?: Date | Timestamp;
 };
 
- /* ───────── 料金系 ───────── */
-  const UNPAID_STATUSES: PaymentStatus[] = [
-    "none",
-    "canceled",
-    "past_due",
-    "incomplete",
-    "incomplete_expired",
-    "unpaid",
-  ];
+/* ───────── 料金系 ───────── */
+const UNPAID_STATUSES: PaymentStatus[] = [
+  "none",
+  "canceled",
+  "past_due",
+  "incomplete",
+  "incomplete_expired",
+  "unpaid",
+];
 
 /* ───────── ヘルパー ───────── */
 function toJSDate(t?: Date | Timestamp): Date | undefined {
@@ -260,8 +260,6 @@ export default function SiteListPage() {
 
     return () => unsub();
   }, [router]);
-
-
 
   const paidCount = useMemo(
     () =>
@@ -582,6 +580,27 @@ export default function SiteListPage() {
       active ? activeClasses : baseClasses
     );
 
+  const handleReleasePayouts = async (siteId: string, force = true) => {
+    try {
+      const res = await fetch("/api/payouts/release-site", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ siteKey: siteId, force, limit: 50 }), // 必要なら件数調整
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => "");
+        alert(`送金に失敗しました (${res.status})\n${t}`);
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      alert(
+        `送金完了: ${data.released ?? 0} 件 / スキップ ${data.skipped ?? 0} 件`
+      );
+    } catch (e) {
+      alert(`送金APIエラー: ${String(e)}`);
+    }
+  };
+
   /* ───────── Render ───────── */
   return (
     <div className="max-w-3xl mx-auto px-4 pt-10 space-y-4">
@@ -718,7 +737,10 @@ export default function SiteListPage() {
               : undefined) ||
             null;
 
-          const suspended = payoutsSuspendedMap.get(site.id) === true;
+          // ⬇ 販売者ドキュメント有無と停止状態を判定
+          const hasSeller = payoutsSuspendedMap.has(site.id);
+          const suspended =
+            hasSeller && payoutsSuspendedMap.get(site.id) === true;
 
           return (
             <Card
@@ -825,6 +847,12 @@ export default function SiteListPage() {
                           無料
                         </span>
                       )}
+                      {/* ⬇ EC バッジ（siteSellers にドキュメントがある場合のみ） */}
+                      {hasSeller && (
+                        <span className="px-2 py-0.5 text-xs rounded bg-violet-600 text-white">
+                          EC
+                        </span>
+                      )}
                       <h2 className="font-semibold text-lg truncate">
                         {site.siteName || "-"}
                       </h2>
@@ -836,6 +864,16 @@ export default function SiteListPage() {
                           <AlertTriangle size={14} />
                           送金停止中
                         </span>
+                      )}
+                      {hasSeller && (
+                        <Button
+                          className="cursor-pointer"
+                          size="sm"
+                          variant="default"
+                          onClick={() => handleReleasePayouts(site.id, true)} // 期限前でも送金するなら true
+                        >
+                          送金する
+                        </Button>
                       )}
                       {isPending && (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-yellow-500 text-white">
@@ -1015,15 +1053,17 @@ export default function SiteListPage() {
                     ✏ オーナー情報を編集
                   </Button>
 
-                  {/* ⬇ 送金停止 / 再送 トグル */}
-                  <Button
-                    className="cursor-pointer"
-                    size="sm"
-                    variant={suspended ? "default" : "outline"}
-                    onClick={() => handleTogglePayouts(site.id, !suspended)}
-                  >
-                    {suspended ? "再送" : "送金停止"}
-                  </Button>
+                  {/* ⬇ 送金停止 / 再送 トグル（siteSellers にドキュメントがある場合のみ表示） */}
+                  {hasSeller && (
+                    <Button
+                      className="cursor-pointer"
+                      size="sm"
+                      variant={suspended ? "default" : "outline"}
+                      onClick={() => handleTogglePayouts(site.id, !suspended)}
+                    >
+                      {suspended ? "再送" : "送金停止"}
+                    </Button>
+                  )}
 
                   {isPaid && !isPending && (
                     <Button

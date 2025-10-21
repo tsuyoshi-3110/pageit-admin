@@ -856,12 +856,12 @@ export async function POST(req: NextRequest) {
       (customerId ? await findSiteKeyByCustomerId(customerId) : null);
 
     /* D) 🔸 在庫減算（トランザクション + 冪等マーク） */
+    /* D) 🔸 在庫減算（トランザクション + 冪等マーク） */
     await adminDb.runTransaction(async (tx) => {
       // 既に処理済みならスキップ（pending.status === 'paid'）
       const pSnapTx = await tx.get(pendingRef);
       const paidAlready = pSnapTx.exists && pSnapTx.get("status") === "paid";
       if (paidAlready) {
-        // 冪等マークだけ残す
         tx.set(eventRef, {
           type: event.type,
           created: new Date(),
@@ -871,7 +871,7 @@ export async function POST(req: NextRequest) {
         return;
       }
 
-      // 減算対象リスト：pending が無ければ Stripe line items から productId を拾えた分のみ処理
+      // 減算対象の決定（pending 優先 → Stripe line items フォールバック）
       let decList: Array<{ id: string; qty: number }> = [];
       if (pendingItems.length > 0) {
         decList = pendingItems.map((x) => ({
@@ -879,7 +879,6 @@ export async function POST(req: NextRequest) {
           qty: Math.max(0, Number(x.quantity || 0)),
         }));
       } else if (siteKey) {
-        // フォールバック：Product metadata.productId を信頼
         const li = await stripeConnect.checkout.sessions.listLineItems(
           session.id,
           { limit: 100, expand: ["data.price.product"] },
@@ -900,23 +899,44 @@ export async function POST(req: NextRequest) {
           .filter(Boolean) as any[];
       }
 
+      // ---- ここから「stock」コレクションを更新 ----
       if (siteKey && decList.length > 0) {
         for (const row of decList) {
-          const productRef = adminDb
-            .collection("siteProducts")
-            .doc(siteKey)
-            .collection("items")
-            .doc(row.id);
-          const ps = await tx.get(productRef);
-          if (!ps.exists) continue;
-          const stock = Number(ps.get("stock") ?? 0);
-          const sold = Number(ps.get("sold") ?? 0);
-          const newStock = Math.max(0, stock - row.qty);
-          const newSold = sold + row.qty;
-          tx.update(productRef, {
-            stock: newStock,
-            sold: newSold,
-            updatedAt: new Date(),
+          const stockId = `${siteKey}__p:${row.id}`;
+          const stockRef = adminDb.collection("stock").doc(stockId);
+          const s = await tx.get(stockRef);
+
+          if (!s.exists) {
+            // 在庫ドキュメントが無ければ作成（0個）。この注文では減算は実質 0 と同じ。
+            tx.set(stockRef, {
+              id: stockId,
+              siteKey,
+              productId: row.id,
+              sku: null,
+              name: null,
+              stockQty: 0,
+              lowStockThreshold: 0,
+              updatedAt: new Date(),
+            });
+            continue;
+          }
+
+          const before = Number(s.get("stockQty") ?? 0);
+          const after = Math.max(0, before - row.qty); // マイナスにならないよう下限0
+          tx.update(stockRef, { stockQty: after, updatedAt: new Date() });
+
+          // 任意：調整ログ
+          const logRef = adminDb.collection("stockAdjustments").doc();
+          tx.set(logRef, {
+            siteKey,
+            stockId,
+            sku: s.get("sku") ?? null,
+            delta: after - before, // 負数
+            type: "decrement",
+            reason: "sale",
+            beforeQty: before,
+            afterQty: after,
+            createdAt: new Date(),
           });
         }
       }
@@ -934,7 +954,7 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      // 冪等マークを最後に
+      // 冪等マーク
       tx.set(eventRef, {
         type: event.type,
         created: new Date(),

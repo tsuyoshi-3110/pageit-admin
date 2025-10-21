@@ -11,6 +11,7 @@ import {
   Timestamp,
   updateDoc,
   where,
+  setDoc, // ← 追加
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
@@ -139,8 +140,8 @@ export default function SiteListPage() {
   const [editIndustryOther, setEditIndustryOther] = useState<string>("");
 
   // 検索 & フィルタ
-  const [searchKeyword, setSearchKeyword] = useState("");
   type FilterMode = "all" | "paid" | "free" | "unpaid";
+  const [searchKeyword, setSearchKeyword] = useState("");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
 
   // 集金・ログイン情報
@@ -148,6 +149,11 @@ export default function SiteListPage() {
     Map<string, { collected: boolean; lastSentAt?: Date }>
   >(new Map());
   const [credentialsSentMap, setCredentialsSentMap] = useState<
+    Map<string, boolean>
+  >(new Map());
+
+  // ⬇ 送金停止トグル状態（siteSellers/{siteKey}.payoutsSuspended）
+  const [payoutsSuspendedMap, setPayoutsSuspendedMap] = useState<
     Map<string, boolean>
   >(new Map());
 
@@ -226,6 +232,17 @@ export default function SiteListPage() {
         // 集金ログ
         const logs = await fetchTransferLogs();
         setTransferLogMap(mapTransferLogsByEmail(logs));
+
+        // ⬇ 送金停止トグルの読み込み（siteSellers）
+        const sellersSnap = await getDocs(collection(db, "siteSellers")).catch(
+          () => null
+        );
+        const pMap = new Map<string, boolean>();
+        sellersSnap?.docs.forEach((d) => {
+          const data: any = d.data();
+          pMap.set(d.id, data?.payoutsSuspended === true);
+        });
+        setPayoutsSuspendedMap(pMap);
       } finally {
         setLoading(false);
       }
@@ -430,7 +447,7 @@ export default function SiteListPage() {
     );
   };
 
-  // ✅ ここで credentialsSentMap と handleSendCredentials を参照（未使用警告を解消）
+  // ✅ ログイン情報送信ステータス
   const renderCredentialsStatus = (
     email: string | undefined,
     isFreePlan: boolean,
@@ -541,6 +558,16 @@ export default function SiteListPage() {
       )
     );
     setEditingInfoId(null);
+  };
+
+  // ⬇ 送金停止トグルの更新
+  const handleTogglePayouts = async (siteId: string, next: boolean) => {
+    await setDoc(
+      doc(db, "siteSellers", siteId),
+      { payoutsSuspended: next, updatedAt: Timestamp.now() },
+      { merge: true }
+    );
+    setPayoutsSuspendedMap((prev) => new Map(prev.set(siteId, next)));
   };
 
   const badgeBtn = (
@@ -689,12 +716,16 @@ export default function SiteListPage() {
               : undefined) ||
             null;
 
+          const suspended = payoutsSuspendedMap.get(site.id) === true;
+
           return (
             <Card
               key={site.id}
               className={clsx(
                 "p-4 shadow-sm rounded-xl border transition",
-                isUnpaid
+                suspended
+                  ? "border-rose-300 bg-rose-50/40"
+                  : isUnpaid
                   ? "border-amber-300 bg-amber-50/40"
                   : isPending
                   ? "border-yellow-300 bg-yellow-50/30"
@@ -798,6 +829,12 @@ export default function SiteListPage() {
                     </div>
 
                     <div className="flex items-center gap-2">
+                      {suspended && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-rose-600 text-white">
+                          <AlertTriangle size={14} />
+                          送金停止中
+                        </span>
+                      )}
                       {isPending && (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-yellow-500 text-white">
                           解約予約
@@ -818,7 +855,6 @@ export default function SiteListPage() {
                     </div>
                   </div>
 
-                  {/* 詳細 */}
                   {/* 詳細 */}
                   <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 mt-2 text-sm">
                     <div className="flex items-center gap-2">
@@ -975,6 +1011,16 @@ export default function SiteListPage() {
                     }}
                   >
                     ✏ オーナー情報を編集
+                  </Button>
+
+                  {/* ⬇ 送金停止 / 再送 トグル */}
+                  <Button
+                    className="cursor-pointer"
+                    size="sm"
+                    variant={suspended ? "default" : "outline"}
+                    onClick={() => handleTogglePayouts(site.id, !suspended)}
+                  >
+                    {suspended ? "再送" : "送金停止"}
                   </Button>
 
                   {isPaid && !isPending && (

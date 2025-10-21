@@ -765,7 +765,7 @@ export async function POST(req: NextRequest) {
     : undefined;
 
   const session = event.data.object as Stripe.Checkout.Session & {
-    metadata?: { siteKey?: string; lang?: string; uiLang?: string };
+    metadata?: { siteKey?: string; lang?: string; uiLang?: string; transferGroup?: string; sellerConnectId?: string; platformFeePct?: string };
     shipping_details?: ShippingDetails;
   };
 
@@ -856,7 +856,11 @@ export async function POST(req: NextRequest) {
       (customerId ? await findSiteKeyByCustomerId(customerId) : null);
 
     /* D) 🔸 在庫減算（トランザクション + 冪等マーク） */
-    /* D) 🔸 在庫減算（トランザクション + 冪等マーク） */
+    const li = await stripeConnect.checkout.sessions.listLineItems(
+      session.id,
+      { limit: 100, expand: ["data.price.product"] },
+      reqOpts
+    );
     await adminDb.runTransaction(async (tx) => {
       // 既に処理済みならスキップ（pending.status === 'paid'）
       const pSnapTx = await tx.get(pendingRef);
@@ -879,11 +883,6 @@ export async function POST(req: NextRequest) {
           qty: Math.max(0, Number(x.quantity || 0)),
         }));
       } else if (siteKey) {
-        const li = await stripeConnect.checkout.sessions.listLineItems(
-          session.id,
-          { limit: 100, expand: ["data.price.product"] },
-          reqOpts
-        );
         decList = li.data
           .map((x) => {
             const prod =
@@ -1002,7 +1001,41 @@ export async function POST(req: NextRequest) {
         .set({ stripeCustomerId: customerIdResolved }, { merge: true });
     }
 
-    /* G) オーナー宛（日本語固定） */
+    /* G) 🔸 エスクロー記録（SCT: 後日 transfer 解放用） */
+    const DEFAULT_PLATFORM_FEE_RATE = 0.07;
+    const RELEASE_DAYS = 30;
+
+    const transferGroup = session.metadata?.transferGroup || null;
+    const sellerConnectIdEscrow =
+      session.metadata?.sellerConnectId || connectedAccountId || null;
+
+    const gross = session.amount_total ?? 0; // 最小通貨単位
+    const pctMeta = session.metadata?.platformFeePct;
+    const feeRate = Number.isFinite(Number(pctMeta))
+      ? Number(pctMeta)
+      : DEFAULT_PLATFORM_FEE_RATE;
+    const platformFee = Math.floor(gross * feeRate);
+    const sellerAmount = Math.max(0, gross - platformFee);
+
+    const currency = (session.currency || "jpy").toLowerCase();
+    const now = new Date();
+    const releaseAt = new Date(now.getTime() + RELEASE_DAYS * 24 * 60 * 60 * 1000);
+
+    await adminDb.collection("escrows").doc(session.id).set({
+      siteKey: siteKey || null,
+      sessionId: session.id,
+      currency,
+      gross,
+      platformFee,
+      sellerAmount,
+      sellerConnectId: sellerConnectIdEscrow,
+      transferGroup,
+      status: "holding",
+      createdAt: now,
+      releaseAt,
+    });
+
+    /* H) オーナー宛（日本語固定） */
     if (siteKey) {
       const ownerEmail = await getOwnerEmail(siteKey);
       if (ownerEmail) {
@@ -1057,7 +1090,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    /* H) 購入者宛（多言語レシート） */
+    /* I) 購入者宛（多言語レシート） */
     try {
       const buyerEmail =
         session.customer_details?.email || session.customer_email || null;

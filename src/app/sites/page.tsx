@@ -32,7 +32,6 @@ import {
   Mail,
   MapPin,
   Phone,
-  Search,
   User,
   XCircle,
 } from "lucide-react";
@@ -61,40 +60,16 @@ const INDUSTRY_OPTIONS: IndustryOption[] = [
   { value: "other", label: "その他" },
 ];
 
-/* ───────── 型 ───────── */
-type PaymentStatus =
-  | "active"
-  | "pending_cancel"
-  | "canceled"
-  | "none"
-  | "past_due"
-  | "incomplete"
-  | "incomplete_expired"
-  | "unpaid";
-
-type Site = {
-  id: string;
-  siteName: string;
-  ownerName: string;
-  ownerPhone: string;
-  ownerAddress?: string;
-  ownerEmail?: string;
-  homepageUrl?: string;
-  cancelPending?: boolean;
-  paymentStatus?: PaymentStatus;
-  setupMode?: boolean;
-  isFreePlan?: boolean;
-  industry?: { key: string; name: string };
-  headerLogoUrl?: string;
-  headerLogo?: string | { url?: string };
-};
-
-type TransferLog = {
-  id: string;
-  email: string;
-  collected?: boolean;
-  timestamp?: Date | Timestamp;
-};
+import {
+  type Site,
+  type PaymentStatus,
+  type TransferLog,
+} from "@/lib/type/siteListType";
+import { toJSDate, daysAgoString, formatYMD } from "@/lib/siteListHellper";
+import SiteListSearcher, {
+  filterSites,
+} from "@/components/siteList/siteListSearcher";
+import LoadingOverlay from "@/components/common/LoadingOverlah";
 
 /* ───────── 料金系 ───────── */
 const UNPAID_STATUSES: PaymentStatus[] = [
@@ -106,30 +81,14 @@ const UNPAID_STATUSES: PaymentStatus[] = [
   "unpaid",
 ];
 
-/* ───────── ヘルパー ───────── */
-function toJSDate(t?: Date | Timestamp): Date | undefined {
-  if (!t) return undefined;
-  if (t instanceof Timestamp) return t.toDate();
-  if (t instanceof Date) return t;
-  return undefined;
-}
-function daysAgoString(date?: Date): string {
-  if (!date) return "-";
-  const ms = Date.now() - date.getTime();
-  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
-  return days <= 0 ? "本日" : `${days}日前`;
-}
-function formatYMD(date?: Date): string {
-  if (!date) return "";
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
 export default function SiteListPage() {
   const [sites, setSites] = useState<Site[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // グローバル・ローディング（真ん中に出す）
+  const [loadingOverlay, setLoadingOverlay] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState<string>("");
+  const [loadingProgress, setLoadingProgress] = useState<number | null>(null);
 
   // URL 編集
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -293,36 +252,12 @@ export default function SiteListPage() {
   const totalCount = useMemo(() => sites.length, [sites]);
 
   /* ───────── フィルタ & 検索 ───────── */
-  const filteredSites = sites
-    .filter((site) => {
-      switch (filterMode) {
-        case "paid":
-          return (
-            site.paymentStatus === "active" ||
-            site.paymentStatus === "pending_cancel"
-          );
-        case "free":
-          return !!site.isFreePlan;
-        case "unpaid":
-          return (
-            !site.isFreePlan &&
-            !!site.paymentStatus &&
-            UNPAID_STATUSES.includes(site.paymentStatus)
-          );
-        default:
-          return true;
-      }
-    })
-    .filter((site) => {
-      const keyword = searchKeyword.toLowerCase();
-      return (
-        site.siteName?.toLowerCase().includes(keyword) ||
-        site.ownerName?.toLowerCase().includes(keyword) ||
-        site.ownerPhone?.toLowerCase().includes(keyword) ||
-        site.ownerEmail?.toLowerCase().includes(keyword)
-      );
-    })
-    .sort((a, b) => (a.ownerName ?? "").localeCompare(b.ownerName ?? "", "ja"));
+  const filteredSites = useMemo(() => {
+    const out = filterSites(sites, filterMode, searchKeyword);
+    return out.sort((a, b) =>
+      (a.ownerName ?? "").localeCompare(b.ownerName ?? "", "ja")
+    );
+  }, [sites, filterMode, searchKeyword]);
 
   /* ───────── 小物関数 ───────── */
   const fetchCredentialsSentLogs = async () => {
@@ -399,48 +334,69 @@ export default function SiteListPage() {
 
     if (!next) {
       try {
+        setLoadingMessage("期日分を即時送金中…");
+        setLoadingProgress(null);
+        setLoadingOverlay(true);
+
         const res = await fetch("/api/payouts/release-site", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ siteKey: siteId, force: false, limit: 100 }),
         });
-        const j = await res.json().catch(() => ({}));
+
+        let j: any = {};
+        try {
+          j = await res.json();
+        } catch {}
+
         if (!res.ok) {
           alert(`期日分の即時送金に失敗しました (${res.status})`);
-          return;
+        } else {
+          alert(
+            `期日分を即時送金：${j.released ?? 0} 件（スキップ ${
+              j.skipped ?? 0
+            }, 失敗 ${j.failed ?? 0}）`
+          );
         }
-        alert(
-          `期日分を即時送金：${j.released ?? 0} 件（スキップ ${
-            j.skipped ?? 0
-          }, 失敗 ${j.failed ?? 0}）`
-        );
       } catch (e) {
         alert(`期日分の即時送金APIエラー: ${String(e)}`);
+      } finally {
+        setLoadingOverlay(false);
+        setLoadingMessage("");
+        setLoadingProgress(null);
       }
     }
   };
 
   // 🔸 送金API（force: true=期日前も含め全額 / false=期日到来分のみ）
   const handleReleasePayouts = async (siteId: string, force = true) => {
+    setLoadingMessage(force ? "全額送金中…" : "期日分を送金中…");
+    setLoadingProgress(null);
+    setLoadingOverlay(true);
     try {
       const res = await fetch("/api/payouts/release-site", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ siteKey: siteId, force, limit: 50 }),
       });
+
       if (!res.ok) {
         const t = await res.text().catch(() => "");
         alert(`送金に失敗しました (${res.status})\n${t}`);
-        return;
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(
+          `送金完了: ${data.released ?? 0} 件 / スキップ ${
+            data.skipped ?? 0
+          } 件 / 失敗 ${data.failed ?? 0} 件`
+        );
       }
-      const data = await res.json().catch(() => ({}));
-      alert(
-        `送金完了: ${data.released ?? 0} 件 / スキップ ${
-          data.skipped ?? 0
-        } 件 / 失敗 ${data.failed ?? 0} 件`
-      );
     } catch (e) {
       alert(`送金APIエラー: ${String(e)}`);
+    } finally {
+      setLoadingOverlay(false);
+      setLoadingMessage("");
+      setLoadingProgress(null);
     }
   };
 
@@ -454,26 +410,35 @@ export default function SiteListPage() {
       active ? activeClasses : baseClasses
     );
 
-  // --- ここから: 4つのハンドラを SiteListPage() の中に追加（return より上） ---
+  // --- ここから: 4つのハンドラ ---
 
-  function handleSave(siteId: string) {
-    return updateDoc(doc(db, "siteSettings", siteId), {
-      homepageUrl: homepageInput,
-      updatedAt: Timestamp.now(),
-    })
-      .then(() => {
-        setSites((prev) =>
-          prev.map((s) =>
-            s.id === siteId ? { ...s, homepageUrl: homepageInput } : s
-          )
-        );
-        setEditingId(null);
-        setHomepageInput("");
-      })
-      .catch((e) => {
-        console.error("handleSave error:", e);
-        alert("URLの保存に失敗しました。");
+  async function handleSave(siteId: string) {
+    setLoadingMessage("URLを保存中…");
+    setLoadingProgress(null);
+    setLoadingOverlay(true);
+
+    try {
+      await updateDoc(doc(db, "siteSettings", siteId), {
+        homepageUrl: homepageInput,
+        updatedAt: Timestamp.now(),
       });
+
+      setSites((prev) =>
+        prev.map((s) =>
+          s.id === siteId ? { ...s, homepageUrl: homepageInput } : s
+        )
+      );
+
+      setEditingId(null);
+      setHomepageInput("");
+    } catch (e) {
+      console.error("handleSave error:", e);
+      alert("URLの保存に失敗しました。");
+    } finally {
+      setLoadingOverlay(false);
+      setLoadingMessage("");
+      setLoadingProgress(null);
+    }
   }
 
   async function handleCancel(siteId: string) {
@@ -507,28 +472,17 @@ export default function SiteListPage() {
   }
 
   async function handleUpdateInfo(siteId: string) {
-    const INDUSTRY_OPTIONS: { value: string; label: string }[] = [
-      { value: "food", label: "飲食" },
-      { value: "retail", label: "小売" },
-      { value: "beauty", label: "美容・サロン" },
-      { value: "medical", label: "医療・介護" },
-      { value: "construction", label: "建設・不動産" },
-      { value: "it", label: "IT・ソフトウェア" },
-      { value: "education", label: "教育・スクール" },
-      { value: "logistics", label: "物流・運輸" },
-      { value: "manufacturing", label: "製造" },
-      { value: "professional", label: "士業" },
-      { value: "service", label: "サービス" },
-      { value: "other", label: "その他" },
-    ];
-
-    const industryName =
-      editIndustryKey === "other"
-        ? editIndustryOther.trim()
-        : INDUSTRY_OPTIONS.find((o) => o.value === editIndustryKey)?.label ||
-          "";
+    setLoadingMessage("オーナー情報を保存中…");
+    setLoadingProgress(null);
+    setLoadingOverlay(true);
 
     try {
+      const industryName =
+        editIndustryKey === "other"
+          ? editIndustryOther.trim()
+          : INDUSTRY_OPTIONS.find((o) => o.value === editIndustryKey)?.label ||
+            "";
+
       await updateDoc(doc(db, "siteSettings", siteId), {
         siteName: editSiteName,
         ownerName: editOwnerName,
@@ -560,6 +514,10 @@ export default function SiteListPage() {
     } catch (e) {
       console.error("handleUpdateInfo error:", e);
       alert("保存に失敗しました。");
+    } finally {
+      setLoadingOverlay(false);
+      setLoadingMessage("");
+      setLoadingProgress(null);
     }
   }
 
@@ -568,6 +526,12 @@ export default function SiteListPage() {
   /* ───────── Render ───────── */
   return (
     <div className="max-w-3xl mx-auto px-4 pt-10 space-y-4">
+      <LoadingOverlay
+        open={loadingOverlay}
+        message={loadingMessage || "処理中…"}
+        progress={loadingProgress}
+      />
+
       {/* 上部サマリー */}
       <Card className="p-3 sticky top-16 z-20 bg-white/80 backdrop-blur">
         <div className="flex items-center justify-between">
@@ -636,26 +600,11 @@ export default function SiteListPage() {
         </div>
 
         {/* 検索 */}
-        <div className="mt-3 relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-          <Input
-            type="text"
-            placeholder={`${
-              filterMode === "all"
-                ? ""
-                : `（${
-                    filterMode === "paid"
-                      ? "有料"
-                      : filterMode === "free"
-                      ? "無料"
-                      : "未払い"
-                  }のみ）`
-            }名前・電話・メールで検索`}
-            className="pl-9"
-            value={searchKeyword}
-            onChange={(e) => setSearchKeyword(e.target.value)}
-          />
-        </div>
+        <SiteListSearcher
+          filterMode={filterMode}
+          searchKeyword={searchKeyword}
+          setSearchKeyword={setSearchKeyword}
+        />
       </Card>
 
       {/* 🔧 エスクロー保留日数の設定カード（全サイト共通） */}

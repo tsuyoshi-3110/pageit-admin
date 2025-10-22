@@ -327,7 +327,7 @@ export default function SiteListPage() {
   const handleTogglePayouts = async (siteId: string, next: boolean) => {
     await setDoc(
       doc(db, "siteSellers", siteId),
-      { payoutsSuspended: next, updatedAt: Timestamp.now() },
+      { payoutsSuspended: next, ecStop: next, updatedAt: Timestamp.now() },
       { merge: true }
     );
     setPayoutsSuspendedMap((prev) => new Map(prev.set(siteId, next)));

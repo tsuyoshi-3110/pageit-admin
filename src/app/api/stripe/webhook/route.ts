@@ -521,9 +521,11 @@ async function buildItemsFromStripe(
 
     const names: MailItem["names"] = { default: defaultName };
     for (const lk of langs) {
-      const v = md[`name_${lk}`];
+      // ここを強化：ja のときは name_ja が無ければ name を使う
+      const v = md[`name_${lk}`] || (lk === "ja" ? md["name"] : undefined);
       if (typeof v === "string" && v.trim()) names[lk] = v.trim();
     }
+    // 既存のフォールバックはそのまま
     if (!names.ja) names.ja = defaultName;
     if (!names.en) names.en = defaultName;
 

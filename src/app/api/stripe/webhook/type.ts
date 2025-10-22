@@ -1,0 +1,16 @@
+export type LangKey =
+  | "ja"
+  | "en"
+  | "fr"
+  | "es"
+  | "de"
+  | "it"
+  | "pt"
+  | "pt-BR"
+  | "ko"
+  | "zh"
+  | "zh-TW"
+  | "ru"
+  | "th"
+  | "vi"
+  | "id";

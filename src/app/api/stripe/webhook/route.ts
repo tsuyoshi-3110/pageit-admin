@@ -84,8 +84,8 @@ async function logOrderMail(rec: {
 }
 
 /* --------------------------- Language --------------------------- */
-type LangKey =
-  | "ja" | "en" | "fr" | "es" | "de" | "it" | "pt" | "pt-BR" | "ko" | "zh" | "zh-TW" | "ru" | "th" | "vi" | "id";
+const SUPPORTED_LANGS = ["ja","en","fr","es","de","it","pt","pt-BR","ko","zh","zh-TW","ru","th","vi","id"] as const;
+type LangKey = typeof SUPPORTED_LANGS[number];
 
 function normalizeLang(input?: string | null): LangKey {
   const v = (input || "").toLowerCase();
@@ -120,10 +120,9 @@ const buyerText: Record<LangKey, {
   en: { subject:"Thanks for your purchase (receipt)", heading:"Thank you for your order", orderId:"Order ID", payment:"Payment", buyer:"Buyer",
     table:{ name:"Item", unit:"Unit price", qty:"Qty", subtotal:"Subtotal" }, total:"Total", shipTo:"Shipping address", name:"Name", phone:"Phone", address:"Address",
     footer:"This email was sent automatically by Stripe Webhook." },
-  // …他言語は省略せず元のまま（ここでは割愛。必要ならそのまま残してください）
   fr:{subject:"Merci pour votre achat (reçu)",heading:"Merci pour votre commande",orderId:"ID de commande",payment:"Paiement",buyer:"Acheteur",
     table:{name:"Article",unit:"Prix unitaire",qty:"Qté",subtotal:"Sous-total"},total:"Total",shipTo:"Adresse de livraison",name:"Nom",phone:"Téléphone",address:"Adresse",
-    footer:"Cet e-mail a été sent automatiquement par Stripe Webhook."},
+    footer:"Cet e-mail a été envoyé automatiquement par Stripe Webhook."},
   es:{subject:"Gracias por su compra (recibo)",heading:"Gracias por su pedido",orderId:"ID de pedido",payment:"Pago",buyer:"Comprador",
     table:{name:"Producto",unit:"Precio unitario",qty:"Cant.",subtotal:"Subtotal"},total:"Total",shipTo:"Dirección de envío",name:"Nombre",phone:"Teléfono",address:"Dirección",
     footer:"Este correo fue enviado automáticamente por Stripe Webhook."},
@@ -195,7 +194,7 @@ async function buildItemsFromStripe(
   }
   console.log("[webhook] listLineItems scope:", scope, "count:", li.data.length);
 
-  const langs: LangKey[] = ["ja","en","fr","es","de","it","pt","pt-BR","ko","zh","zh-TW","ru","th","vi","id"];
+  const langs: LangKey[] = SUPPORTED_LANGS as unknown as LangKey[];
   const base = preferLang.split("-")[0] as LangKey;
 
   return li.data.map((x) => {
@@ -222,8 +221,30 @@ async function buildItemsFromStripe(
   });
 }
 
+/* ---------- line items (product expand) を確実に取るフォールバック ---------- */
+async function fetchLineItemsWithFallback(
+  sessionId: string,
+  reqOpts?: Stripe.RequestOptions
+) {
+  const fetch = (o?: Stripe.RequestOptions) =>
+    stripeConnect.checkout.sessions.listLineItems(
+      sessionId,
+      { limit: 100, expand: ["data.price.product"] },
+      o
+    );
+
+  // まずは reqOpts 側（Connected）か Platform 側のどちらか
+  let li = reqOpts ? await fetch(reqOpts) : await fetch();
+
+  // product が未展開なら逆側でもう一度
+  const notExpanded = li.data.some(d => typeof d.price?.product === "string");
+  if (notExpanded) {
+    li = reqOpts ? await fetch() : await fetch(reqOpts);
+  }
+  return li;
+}
+
 /* ----------------------------- HTML ----------------------------- */
-// buildOwnerHtmlJa / buildBuyerHtmlI18n は元の実装のまま（長いので割愛せずに利用）
 function buildOwnerHtmlJa(
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
   items: MailItem[]
@@ -346,7 +367,8 @@ export async function POST(req: NextRequest) {
   const eventSnap = await eventRef.get();
   if (eventSnap.exists) return new Response("OK", { status: 200 });
 
-  if (event.type !== "checkout.session.completed") {
+  // 同期/非同期どちらの完了イベントでも処理
+  if (event.type !== "checkout.session.completed" && event.type !== "checkout.session.async_payment_succeeded") {
     await eventRef.set({ type: event.type, created: new Date(), skipped: true });
     return new Response("OK", { status: 200 });
   }
@@ -424,11 +446,8 @@ export async function POST(req: NextRequest) {
     /* D) 🔸 在庫減算（商品ドキュメント + stock 両方、トランザクション） */
     const { FieldValue } = await import("firebase-admin/firestore");
 
-    const li = await stripeConnect.checkout.sessions.listLineItems(
-      session.id,
-      { limit: 100, expand: ["data.price.product"] },
-      reqOpts
-    );
+    // フォールバック付きで product 展開済み line items を取得
+    const li = await fetchLineItemsWithFallback(session.id, reqOpts);
 
     await adminDb.runTransaction(async (tx) => {
       // 既に処理済みならスキップ
@@ -477,14 +496,18 @@ export async function POST(req: NextRequest) {
 
           const after = Math.max(0, (before as number) - row.qty);
 
-          // product doc の更新（存在すれば）
+          // product doc の更新（merge で3キー同時に安全更新）
           if (pSnap.exists) {
-            const d = pSnap.data() as any;
-            const update: any = { updatedAt: FieldValue.serverTimestamp() };
-            if (typeof d?.stockQty !== "undefined") update.stockQty = after;
-            else if (typeof d?.stock !== "undefined") update.stock = after;
-            else update["inventory.stockQty"] = after;
-            tx.update(prodRef, update);
+            tx.set(
+              prodRef,
+              {
+                stockQty: after,
+                stock: after,
+                "inventory.stockQty": after,
+                updatedAt: FieldValue.serverTimestamp(),
+              },
+              { merge: true }
+            );
           }
 
           // stock コレクションも同期

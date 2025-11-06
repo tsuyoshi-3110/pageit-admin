@@ -71,9 +71,6 @@ import SiteListSearcher, {
 } from "@/components/siteList/siteListSearcher";
 import LoadingOverlay from "@/components/common/LoadingOverlah";
 
-// 既存 imports に追加
-import { orderBy as fbOrderBy, limit as fbLimit } from "firebase/firestore";
-
 import {
   Dialog,
   DialogContent,
@@ -160,7 +157,6 @@ export default function SiteListPage() {
   const [holdDays, setHoldDays] = useState<number | null>(null);
   const [savingHold, setSavingHold] = useState(false);
   const [ordersOpenFor, setOrdersOpenFor] = useState<string | null>(null);
-  const [ordersLoading, setOrdersLoading] = useState(false);
   const [orders, setOrders] = useState<OrderDoc[]>([]);
   const [refundingId, setRefundingId] = useState<string | null>(null);
   const [refundAmountMap, setRefundAmountMap] = useState<
@@ -269,37 +265,6 @@ export default function SiteListPage() {
 
   const jpy = (n: number | undefined) =>
     typeof n === "number" ? `¥${n.toLocaleString("ja-JP")}` : "-";
-
-  async function fetchOrders(siteKey: string) {
-    setOrdersLoading(true);
-    try {
-      const q_ = query(
-        collection(db, "siteOrders"),
-        where("siteKey", "==", siteKey),
-        fbOrderBy("createdAt", "desc"),
-        fbLimit(100)
-      );
-      const snap = await getDocs(q_);
-      const list: OrderDoc[] = snap.docs.map((d) => {
-        const x: any = d.data();
-        return {
-          id: d.id,
-          ...x,
-          refundAt: x?.refundAt?.toDate ? x.refundAt.toDate() : null,
-          createdAt: x?.createdAt?.toDate ? x.createdAt.toDate() : null,
-        };
-      });
-      setOrders(list);
-      // デフォルトの返金額 = 全額
-      const defaults: Record<string, number> = {};
-      list.forEach((o) => {
-        if (!o.refunded) defaults[o.id] = Number(o.amount || 0);
-      });
-      setRefundAmountMap(defaults);
-    } finally {
-      setOrdersLoading(false);
-    }
-  }
 
   async function handleRefund(order: OrderDoc) {
     if (!order.paymentIntentId) {
@@ -956,12 +921,11 @@ export default function SiteListPage() {
                             className="cursor-pointer"
                             size="sm"
                             variant="outline"
-                            onClick={async () => {
-                              setOrdersOpenFor(site.id);
-                              await fetchOrders(site.id);
-                            }}
+                            onClick={() =>
+                              nextRouter.push(`/orders/${site.id}`)
+                            }
                           >
-                            🛒 購入履歴を表示
+                            購入履歴
                           </Button>
                         </div>
                       )}
@@ -1313,99 +1277,89 @@ export default function SiteListPage() {
             <DialogTitle>購入履歴</DialogTitle>
           </DialogHeader>
 
-          {ordersLoading ? (
-            <div className="py-8 text-center text-sm text-gray-500">
-              読み込み中…
-            </div>
-          ) : orders.length === 0 ? (
-            <div className="py-8 text-center text-sm text-gray-500">
-              購入履歴はありません。
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>日時</TableHead>
-                    <TableHead>購入者</TableHead>
-                    <TableHead className="text-right">金額</TableHead>
-                    <TableHead>PI</TableHead>
-                    <TableHead>状態</TableHead>
-                    <TableHead className="text-right">返金</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {orders.map((o) => {
-                    const created =
-                      o.createdAt instanceof Date
-                        ? o.createdAt
-                        : o.createdAt?.toDate?.() ?? null;
-                    const canRefund = !!o.paymentIntentId && !o.refunded;
-                    return (
-                      <TableRow key={o.id}>
-                        <TableCell className="whitespace-nowrap">
-                          {created ? created.toLocaleString("ja-JP") : "-"}
-                        </TableCell>
-                        <TableCell className="max-w-[180px] truncate">
-                          {o.customer?.name || o.customer?.email || "-"}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {jpy(o.amount)}
-                        </TableCell>
-                        <TableCell
-                          className="max-w-[180px] truncate"
-                          title={o.paymentIntentId}
-                        >
-                          {o.paymentIntentId ?? "-"}
-                        </TableCell>
-                        <TableCell>
-                          {o.refunded ? (
-                            <span className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700">
-                              返金済
-                            </span>
-                          ) : (
-                            <span className="px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-700">
-                              購入済
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {canRefund ? (
-                            <div className="flex items-center justify-end gap-2">
-                              <Input
-                                type="number"
-                                className="w-24 text-right"
-                                value={refundAmountMap[o.id] ?? o.amount ?? 0}
-                                min={1}
-                                max={o.amount ?? 0}
-                                onChange={(e) =>
-                                  setRefundAmountMap((m) => ({
-                                    ...m,
-                                    [o.id]: Number(e.target.value || 0),
-                                  }))
-                                }
-                              />
-                              <Button
-                                size="sm"
-                                disabled={refundingId === o.id}
-                                onClick={() => handleRefund(o)}
-                              >
-                                {refundingId === o.id ? "返金中…" : "返金"}
-                              </Button>
-                            </div>
-                          ) : (
-                            <span className="text-xs text-gray-500">
-                              {o.refunded ? "—" : "PIなし"}
-                            </span>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </div>
-          )}
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>日時</TableHead>
+                  <TableHead>購入者</TableHead>
+                  <TableHead className="text-right">金額</TableHead>
+                  <TableHead>PI</TableHead>
+                  <TableHead>状態</TableHead>
+                  <TableHead className="text-right">返金</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {orders.map((o) => {
+                  const created =
+                    o.createdAt instanceof Date
+                      ? o.createdAt
+                      : o.createdAt?.toDate?.() ?? null;
+                  const canRefund = !!o.paymentIntentId && !o.refunded;
+                  return (
+                    <TableRow key={o.id}>
+                      <TableCell className="whitespace-nowrap">
+                        {created ? created.toLocaleString("ja-JP") : "-"}
+                      </TableCell>
+                      <TableCell className="max-w-[180px] truncate">
+                        {o.customer?.name || o.customer?.email || "-"}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {jpy(o.amount)}
+                      </TableCell>
+                      <TableCell
+                        className="max-w-[180px] truncate"
+                        title={o.paymentIntentId}
+                      >
+                        {o.paymentIntentId ?? "-"}
+                      </TableCell>
+                      <TableCell>
+                        {o.refunded ? (
+                          <span className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700">
+                            返金済
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-700">
+                            購入済
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {canRefund ? (
+                          <div className="flex items-center justify-end gap-2">
+                            <Input
+                              type="number"
+                              className="w-24 text-right"
+                              value={refundAmountMap[o.id] ?? o.amount ?? 0}
+                              min={1}
+                              max={o.amount ?? 0}
+                              onChange={(e) =>
+                                setRefundAmountMap((m) => ({
+                                  ...m,
+                                  [o.id]: Number(e.target.value || 0),
+                                }))
+                              }
+                            />
+                            <Button
+                              size="sm"
+                              disabled={refundingId === o.id}
+                              onClick={() => handleRefund(o)}
+                            >
+                              {refundingId === o.id ? "返金中…" : "返金"}
+                            </Button>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-500">
+                            {o.refunded ? "—" : "PIなし"}
+                          </span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setOrdersOpenFor(null)}>

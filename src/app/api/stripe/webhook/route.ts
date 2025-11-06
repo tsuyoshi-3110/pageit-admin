@@ -125,7 +125,6 @@ async function buildItemsFromStripe(
     const metaPrefer = md[`name_${preferLang}`] || md[`name_${base}`] || md.name;
     const defaultName = desc || metaPrefer || prod?.name || "Item";
 
-    // ja は name_ja が無ければ name（＝base.title が入っている想定）を採用
     const names: MailItem["names"] = { default: defaultName };
     for (const lk of langs) {
       const v = md[`name_${lk}`] || (lk === "ja" ? md["name"] : undefined);
@@ -161,7 +160,6 @@ async function buildJaItemsFromFirestore(
     const sk = md.siteKey || (session.metadata?.siteKey ?? null);
 
     let jaName = "";
-    // 1) Firestore base.title 最優先
     if (pid && sk) {
       try {
         const doc = await adminDb.doc(`siteProducts/${sk}/items/${pid}`).get();
@@ -172,7 +170,6 @@ async function buildJaItemsFromFirestore(
           "";
       } catch {}
     }
-    // 2) 取れなければ Stripe 側にフォールバック
     if (!jaName) {
       const desc = (x.description || "").trim();
       jaName = desc || (prod?.name ?? "") || "商品";
@@ -183,7 +180,7 @@ async function buildJaItemsFromFirestore(
     const unitMajor = subMajor / Math.max(1, qty);
 
     out.push({
-      names: { default: jaName, ja: jaName }, // 日本語固定
+      names: { default: jaName, ja: jaName },
       qty,
       unitAmount: unitMajor,
       subtotal: subMajor,
@@ -388,7 +385,14 @@ export async function POST(req: NextRequest) {
       session.client_reference_id ??
       (customerId ? await findSiteKeyByCustomerId(customerId) : null);
 
-    // D) 在庫減算
+    // ★ D) orderId 解決（優先順：session.metadata → pi.metadata → client_reference_id → session.id）
+    const orderId =
+      session.metadata?.orderId ||
+      (pi?.metadata?.orderId as string | undefined) ||
+      session.client_reference_id ||
+      session.id;
+
+    // E) 在庫減算
     const li = await stripeConnect.checkout.sessions.listLineItems(session.id, { limit: 100, expand: ["data.price.product"] }, reqOpts);
     await adminDb.runTransaction(async (tx) => {
       const pSnapTx = await tx.get(pendingRef);
@@ -440,6 +444,7 @@ export async function POST(req: NextRequest) {
         tx.update(pendingRef, {
           status: "paid",
           paidAt: new Date(),
+          orderId, // ★ 追加
           sessionSummary: {
             amount_total: session.amount_total ?? null,
             currency: session.currency ?? "jpy",
@@ -451,42 +456,49 @@ export async function POST(req: NextRequest) {
       tx.set(eventRef, { type: event.type, created: new Date(), sessionId: session.id });
     });
 
-    /* E) 保存＆メール
+    /* F) 保存＆メール
           - ダッシュボード保存用：常に base.title（=日本語）で再構築
           - オーナー通知：日本語
           - バイヤー通知：日本語のときのみ base.title、それ以外は従来通り */
     const itemsForOwner = await buildJaItemsFromFirestore(session, reqOpts);
-    const itemsForDashboard = itemsForOwner; // ダッシュボードは常に日本語
-    const itemsForBuyer =
-      buyerLang === "ja" ? itemsForOwner : items;
+    const itemsForDashboard = itemsForOwner;
+    const itemsForBuyer = buyerLang === "ja" ? itemsForOwner : items;
 
-    await adminDb.collection("siteOrders").add({
+    // ★ G) siteOrders: add() → doc(orderId).set() に変更し、PI と Connected Account を必ず保存
+    await adminDb.collection("siteOrders").doc(orderId).set({
+      orderId,
       siteKey: siteKey || null,
       createdAt: new Date(),
-      stripeCheckoutSessionId: session.id,
+      checkout_session_id: session.id,
+      payment_intent_id: pi?.id || null,
+      connected_account_id: connectedAccountId || null,
+      transfer_group: session.metadata?.transferGroup || null,
+
       amount: session.amount_total,
       currency: session.currency,
       payment_status: session.payment_status,
       payment_type: paymentType,
       card_brand: cardBrand,
       card_last4: last4,
+
       customer: {
         email: session.customer_details?.email ?? null,
         name: session.customer_details?.name ?? (session as any).shipping_details?.name ?? null,
         phone: phoneFallback,
         address: session.customer_details?.address ?? (session as any).shipping_details?.address ?? null,
       },
+
       items: itemsForDashboard.map((i) => ({
-        // ダッシュボードは常に日本語
         name: i.names.ja ?? i.names.default,
         qty: i.qty,
         unitAmount: i.unitAmount,
         subtotal: i.subtotal,
       })),
-      buyer_lang: buyerLang,
-    });
 
-    /* F) stripeCustomerId 保存 */
+      buyer_lang: buyerLang,
+    }, { merge: true });
+
+    /* H) stripeCustomerId 保存 */
     const customerIdResolved = (session.customer as string) || null;
     if (siteKey && customerIdResolved) {
       await adminDb.doc(`siteSettings/${siteKey}`).set({ stripeCustomerId: customerIdResolved }, { merge: true });
@@ -521,7 +533,7 @@ export async function POST(req: NextRequest) {
       return 30 * 24 * 60 * 60 * 1000;
     }
 
-    /* G) エスクロー */
+    /* I) エスクロー */
     const DEFAULT_PLATFORM_FEE_RATE = 0.07;
     const holdMs = await resolveHoldMs(siteKey || null);
     const now = new Date();
@@ -556,7 +568,7 @@ export async function POST(req: NextRequest) {
       releaseAt,
     });
 
-    /* H) オーナー宛（日本語固定） */
+    /* J) オーナー宛（日本語固定） */
     if (siteKey) {
       const ownerEmail = await getOwnerEmail(siteKey);
       if (ownerEmail) {
@@ -579,7 +591,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    /* I) 購入者宛（多言語） */
+    /* K) 購入者宛（多言語） */
     try {
       const buyerEmail = session.customer_details?.email || session.customer_email || null;
       if (buyerEmail) {

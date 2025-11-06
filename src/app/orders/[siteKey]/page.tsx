@@ -39,7 +39,6 @@ type OrderDoc = {
   refundAt?: Date | null;
   customer?: { name?: string; email?: string };
   createdAt?: any;              // Timestamp | Date
-  // 商品情報（存在すれば表示）
   items?: Array<{ name?: string; qty?: number; unitAmount?: number }>;
 };
 
@@ -60,7 +59,6 @@ export default function OrdersPage({
   const [orders, setOrders] = useState<OrderDoc[]>([]);
   const [refundingId, setRefundingId] = useState<string | null>(null);
   const [refundAmountMap, setRefundAmountMap] = useState<Record<string, number>>({});
-  // 注文IDフィルター（部分一致）
   const [orderIdFilter, setOrderIdFilter] = useState("");
 
   useEffect(() => {
@@ -139,7 +137,7 @@ export default function OrdersPage({
           orderId: order.id,
           siteKey: order.siteKey,
           paymentIntentId: order.paymentIntentId,
-          amount: reqAmount, // 未指定ならサーバーで全額
+          amount: reqAmount,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -174,13 +172,13 @@ export default function OrdersPage({
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
-      <div className="flex items-center justify-between">
+      {/* ヘッダー */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-xl md:text-2xl font-bold">{title}</h1>
         <div className="flex gap-2">
-          {/* 注文IDフィルター */}
           <Input
             placeholder="注文IDで絞り込み"
-            className="w-48"
+            className="w-44 sm:w-60"
             value={orderIdFilter}
             onChange={(e) => setOrderIdFilter(e.target.value)}
           />
@@ -195,119 +193,225 @@ export default function OrdersPage({
         </div>
       </div>
 
-      <Card className="p-4">
+      {/* 本体 */}
+      <Card className="p-3 sm:p-4">
         {loading ? (
           <div className="flex justify-center items-center py-16 text-muted-foreground">
             <Loader2 className="h-6 w-6 animate-spin mr-2" />
             読み込み中…
           </div>
         ) : filteredOrders.length === 0 ? (
-          <div className="py-8 text-center text-sm text-gray-600">購入履歴はありません。</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>日時</TableHead>
-                  <TableHead>購入者</TableHead>
-                  <TableHead>注文ID</TableHead>
-                  <TableHead>商品</TableHead>
-                  <TableHead className="text-right">金額</TableHead>
-                  <TableHead>PI</TableHead>
-                  <TableHead>状態</TableHead>
-                  <TableHead className="text-right">返金</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredOrders.map((o) => {
-                  const created =
-                    o.createdAt instanceof Date
-                      ? o.createdAt
-                      : o.createdAt?.toDate?.() ?? null;
-                  const canRefund = !!o.paymentIntentId && !o.refunded;
-                  // 商品名（name × qty をカンマ区切り）
-                  const itemLabel =
-                    o.items?.length
-                      ? o.items
-                          .map((i) => {
-                            const n = i?.name?.trim();
-                            if (!n) return "";
-                            const q = typeof i?.qty === "number" && i.qty > 0 ? `×${i.qty}` : "";
-                            return `${n}${q}`;
-                          })
-                          .filter(Boolean)
-                          .join(", ")
-                      : "-";
-                  return (
-                    <TableRow key={o.id}>
-                      <TableCell className="whitespace-nowrap">
-                        {created ? created.toLocaleString("ja-JP") : "-"}
-                      </TableCell>
-                      <TableCell className="max-w-[220px] truncate">
-                        {o.customer?.name || o.customer?.email || "-"}
-                      </TableCell>
-                      <TableCell
-                        className="max-w-[240px] truncate font-mono text-[11px]"
-                        title={o.id}
-                      >
-                        {o.id}
-                      </TableCell>
-                      <TableCell className="max-w-[320px] truncate" title={itemLabel}>
-                        {itemLabel}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {jpy(o.amount)}
-                      </TableCell>
-                      <TableCell className="max-w-[260px] truncate" title={o.paymentIntentId}>
-                        {o.paymentIntentId ?? "-"}
-                      </TableCell>
-                      <TableCell>
-                        {o.refunded ? (
-                          <span className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700">
-                            返金済
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-700">
-                            購入済
-                          </span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {canRefund ? (
-                          <div className="flex items-center justify-end gap-2">
-                            <Input
-                              type="number"
-                              className="w-24 text-right"
-                              value={refundAmountMap[o.id] ?? o.amount ?? 0}
-                              min={1}
-                              max={o.amount ?? 0}
-                              onChange={(e) =>
-                                setRefundAmountMap((m) => ({
-                                  ...m,
-                                  [o.id]: Number(e.target.value || 0),
-                                }))
-                              }
-                            />
-                            <Button
-                              size="sm"
-                              disabled={refundingId === o.id}
-                              onClick={() => handleRefund(o)}
-                            >
-                              {refundingId === o.id ? "返金中…" : "返金"}
-                            </Button>
-                          </div>
-                        ) : (
-                          <span className="text-xs text-gray-500">
-                            {o.refunded ? "—" : "PIなし"}
-                          </span>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+          <div className="py-8 text-center text-sm text-gray-600">
+            購入履歴はありません。
           </div>
+        ) : (
+          <>
+            {/* モバイル：カード縦並び */}
+            <div className="md:hidden space-y-3">
+              {filteredOrders.map((o) => {
+                const created =
+                  o.createdAt instanceof Date
+                    ? o.createdAt
+                    : o.createdAt?.toDate?.() ?? null;
+
+                return (
+                  <section key={o.id} className="rounded-lg border bg-white p-3 shadow-sm">
+                    {/* 上段：日時・ステータス */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs text-gray-600">
+                        {created ? created.toLocaleString("ja-JP") : "-"}
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+                          o.refunded
+                            ? "bg-emerald-100 text-emerald-700"
+                            : "bg-blue-100 text-blue-700"
+                        }`}
+                      >
+                        {o.refunded ? "返金済" : "購入済"}
+                      </span>
+                    </div>
+
+                    {/* 注文ID */}
+                    <div className="mt-1 font-mono text-[11px] text-gray-500 break-all">
+                      注文ID: {o.id}
+                    </div>
+
+                    {/* 顧客 */}
+                    <div className="mt-2 text-sm">
+                      <div className="font-medium">
+                        {o.customer?.name || o.customer?.email || "—"}
+                      </div>
+                    </div>
+
+                    {/* 商品（縦） */}
+                    <ul className="mt-2 divide-y">
+                      {(o.items ?? []).length > 0 ? (
+                        (o.items ?? []).map((it, i) => (
+                          <li key={i} className="py-1.5 flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm text-gray-900 break-words">
+                                {(it.name || "-") + (it.qty ? ` ×${it.qty}` : "")}
+                              </div>
+                              {typeof it.unitAmount === "number" && (
+                                <div className="text-xs text-gray-500">{jpy(it.unitAmount)}</div>
+                              )}
+                            </div>
+
+                            {/* 返金操作（未返金時のみ） */}
+                            {!o.refunded && (
+                              <div className="flex items-center gap-1">
+                                <Input
+                                  type="number"
+                                  className="w-24 h-8 text-right"
+                                  value={refundAmountMap[o.id] ?? o.amount ?? 0}
+                                  min={1}
+                                  max={o.amount ?? 0}
+                                  onChange={(e) =>
+                                    setRefundAmountMap((m) => ({
+                                      ...m,
+                                      [o.id]: Number(e.target.value || 0),
+                                    }))
+                                  }
+                                />
+                                <Button
+                                  size="sm"
+                                  className="h-8"
+                                  disabled={refundingId === o.id}
+                                  onClick={() => handleRefund(o)}
+                                >
+                                  {refundingId === o.id ? "返金中…" : "返金"}
+                                </Button>
+                              </div>
+                            )}
+                          </li>
+                        ))
+                      ) : (
+                        <li className="py-1.5 text-sm text-gray-500">商品情報なし</li>
+                      )}
+                    </ul>
+
+                    {/* 下段：金額・PI */}
+                    <div className="mt-3 flex flex-col gap-1">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-gray-500">金額</span>
+                        <span className="font-semibold">{jpy(o.amount)}</span>
+                      </div>
+                      <div className="text-[11px] text-gray-500 break-all">
+                        PI: {o.paymentIntentId ?? "-"}
+                      </div>
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+
+            {/* デスクトップ：従来のテーブル（列はそのまま） */}
+            <div className="hidden md:block overflow-x-auto mt-2">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>日時</TableHead>
+                    <TableHead>購入者</TableHead>
+                    <TableHead>注文ID</TableHead>
+                    <TableHead>商品</TableHead>
+                    <TableHead className="text-right">金額</TableHead>
+                    <TableHead>PI</TableHead>
+                    <TableHead>状態</TableHead>
+                    <TableHead className="text-right">返金</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredOrders.map((o) => {
+                    const created =
+                      o.createdAt instanceof Date
+                        ? o.createdAt
+                        : o.createdAt?.toDate?.() ?? null;
+                    const canRefund = !!o.paymentIntentId && !o.refunded;
+
+                    const itemLabel =
+                      o.items?.length
+                        ? o.items
+                            .map((i) => {
+                              const n = i?.name?.trim();
+                              if (!n) return "";
+                              const q =
+                                typeof i?.qty === "number" && i.qty > 0 ? `×${i.qty}` : "";
+                              return `${n}${q}`;
+                            })
+                            .filter(Boolean)
+                            .join(", ")
+                        : "-";
+
+                    return (
+                      <TableRow key={o.id}>
+                        <TableCell className="whitespace-nowrap">
+                          {created ? created.toLocaleString("ja-JP") : "-"}
+                        </TableCell>
+                        <TableCell className="max-w-[220px] truncate">
+                          {o.customer?.name || o.customer?.email || "-"}
+                        </TableCell>
+                        <TableCell
+                          className="max-w-[240px] truncate font-mono text-[11px]"
+                          title={o.id}
+                        >
+                          {o.id}
+                        </TableCell>
+                        <TableCell className="max-w-[320px] truncate" title={itemLabel}>
+                          {itemLabel}
+                        </TableCell>
+                        <TableCell className="text-right">{jpy(o.amount)}</TableCell>
+                        <TableCell className="max-w-[260px] truncate" title={o.paymentIntentId}>
+                          {o.paymentIntentId ?? "-"}
+                        </TableCell>
+                        <TableCell>
+                          {o.refunded ? (
+                            <span className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700">
+                              返金済
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-700">
+                              購入済
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {canRefund ? (
+                            <div className="flex items-center justify-end gap-2">
+                              <Input
+                                type="number"
+                                className="w-24 text-right"
+                                value={refundAmountMap[o.id] ?? o.amount ?? 0}
+                                min={1}
+                                max={o.amount ?? 0}
+                                onChange={(e) =>
+                                  setRefundAmountMap((m) => ({
+                                    ...m,
+                                    [o.id]: Number(e.target.value || 0),
+                                  }))
+                                }
+                              />
+                              <Button
+                                size="sm"
+                                disabled={refundingId === o.id}
+                                onClick={() => handleRefund(o)}
+                              >
+                                {refundingId === o.id ? "返金中…" : "返金"}
+                              </Button>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-gray-500">
+                              {o.refunded ? "—" : "PIなし"}
+                            </span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          </>
         )}
       </Card>
     </div>

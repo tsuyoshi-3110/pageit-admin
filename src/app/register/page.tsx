@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FirebaseError } from "firebase/app";
-import { getDoc, doc } from "firebase/firestore";
+import { getDoc, doc, setDoc, serverTimestamp } from "firebase/firestore";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
 import { parsePhoneNumberFromString, AsYouType } from "libphonenumber-js";
@@ -50,6 +50,11 @@ export default function RegisterPage() {
   const [industryKey, setIndustryKey] = useState<string>("");     // セレクト値
   const [industryOther, setIndustryOther] = useState<string>(""); // その他の自由入力
 
+  // ドメイン
+  const [domain, setDomain] = useState("");
+  const [wwwEnabled, setWwwEnabled] = useState(false);
+  const [registeredDomain, setRegisteredDomain] = useState<string | null>(null);
+
   const router = useRouter();
 
   useEffect(() => {
@@ -83,6 +88,11 @@ export default function RegisterPage() {
     }
     if (!industryKey) {
       alert("業種を選択してください。");
+      return;
+    }
+    const normalizedDomain = domain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/\.$/, "");
+    if (normalizedDomain && !/^[a-z0-9][a-z0-9\-.]+\.[a-z]{2,}$/.test(normalizedDomain)) {
+      alert("ドメイン名の形式が正しくありません。例: example.com");
       return;
     }
     const industryName =
@@ -171,11 +181,33 @@ export default function RegisterPage() {
         ownerEmail: email,
         ownerPhone,
         isFreePlan,
-        industry: { key: industryKey, name: industryName }, // ← 追加
+        industry: { key: industryKey, name: industryName },
         ...(customerId && { stripeCustomerId: customerId }),
         ...(subscriptionId && { stripeSubscriptionId: subscriptionId }),
         setupMode: false,
       });
+
+      // siteSettingsEditable を初期化
+      await setDoc(
+        doc(db, "siteSettingsEditable", siteKey),
+        { createdAt: serverTimestamp() },
+        { merge: true }
+      );
+
+      // domains コレクションにホスト名を登録
+      if (normalizedDomain) {
+        await setDoc(doc(db, "domains", normalizedDomain), {
+          siteKey,
+          createdAt: serverTimestamp(),
+        });
+        if (wwwEnabled) {
+          await setDoc(doc(db, "domains", `www.${normalizedDomain}`), {
+            siteKey,
+            createdAt: serverTimestamp(),
+          });
+        }
+        setRegisteredDomain(normalizedDomain);
+      }
 
       alert("登録が完了しました！");
       // 入力リセット
@@ -190,6 +222,8 @@ export default function RegisterPage() {
       setIsFreePlan(false);
       setIndustryKey("");
       setIndustryOther("");
+      setDomain("");
+      setWwwEnabled(false);
     } catch (e) {
       if (e instanceof FirebaseError) {
         alert(
@@ -348,6 +382,30 @@ export default function RegisterPage() {
             )}
           </div>
 
+          {/* ドメイン */}
+          <div className="space-y-2">
+            <label className="text-sm text-gray-700">独自ドメイン（任意）</label>
+            <Input
+              type="text"
+              placeholder="例: example.com（wwwなし）"
+              value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+            />
+            {domain && (
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={wwwEnabled}
+                  onChange={(e) => setWwwEnabled(e.target.checked)}
+                />
+                www.{domain.trim().toLowerCase()} も登録する
+              </label>
+            )}
+            <p className="text-xs text-gray-500">
+              Firestore の domains コレクションに自動登録されます。Vercel へのドメイン追加は別途必要です。
+            </p>
+          </div>
+
           {/* 🆕 業種（セレクト + その他入力） */}
           <div className="space-y-2">
             <label className="text-sm text-gray-700">業種</label>
@@ -382,6 +440,56 @@ export default function RegisterPage() {
           </Button>
         </CardContent>
       </Card>
+      {registeredDomain && (
+        <Card className="w-full max-w-md border-emerald-300 bg-emerald-50">
+          <CardHeader>
+            <CardTitle className="text-emerald-800 text-base">✅ 次のステップ：DNS・Vercel 設定</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <p className="text-gray-700">
+              <strong>{registeredDomain}</strong> の Firestore 登録が完了しました。
+              サイトを公開するには以下の作業も必要です。
+            </p>
+
+            <div>
+              <p className="font-semibold text-gray-800 mb-1">① Vercel にドメインを追加</p>
+              <p className="text-gray-600 text-xs">
+                Vercel ダッシュボード → プロジェクト → Settings → Domains<br />
+                → <code className="bg-white px-1 rounded">{registeredDomain}</code> を追加
+                {wwwEnabled && <> / <code className="bg-white px-1 rounded">www.{registeredDomain}</code> を追加</>}
+              </p>
+            </div>
+
+            <div>
+              <p className="font-semibold text-gray-800 mb-1">② ドメイン登録業者で DNS を設定</p>
+              <div className="bg-white rounded border border-gray-200 p-2 space-y-1 text-xs font-mono">
+                <div>A @ → 76.76.21.21</div>
+                {wwwEnabled && <div>CNAME www → cname.vercel-dns.com</div>}
+              </div>
+              <p className="text-gray-500 text-xs mt-1">
+                ※ Vercel の接続確認画面で正確な値を確認してください
+              </p>
+            </div>
+
+            <div>
+              <p className="font-semibold text-gray-800 mb-1">③ テナントオーナーに案内</p>
+              <p className="text-gray-600 text-xs">
+                ログイン情報（メール・パスワード）を送付し、<br />
+                <code className="bg-white px-1 rounded">{registeredDomain}/login</code> からログインしてもらう
+              </p>
+            </div>
+
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={() => setRegisteredDomain(null)}
+            >
+              閉じる
+            </Button>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

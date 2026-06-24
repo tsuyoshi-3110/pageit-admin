@@ -194,6 +194,48 @@ export default function RegisterPage() {
         { merge: true }
       );
 
+      // sites/{siteKey} を初期化（yotteya のデータが漏れないよう主要フィールドを空値で上書き）
+      const productionUrl = normalizedDomain ? `https://${normalizedDomain}` : "";
+      await setDoc(
+        doc(db, "sites", siteKey),
+        {
+          siteKey,
+          localizedContentMode: "customer-default",
+          productionUrl,
+          vercelUrl: "",
+          brand: {
+            name: siteName,
+            shortName: siteName,
+            copyrightName: siteName,
+            businessCategory: "",
+            tagline: "",
+            description: "",
+            telephone: ownerPhone,
+            logoPath: "",
+            googleSiteVerification: "",
+            keywords: [],
+          },
+          social: { instagram: "", line: "", x: "", facebook: "", youtube: "", tiktok: "" },
+          address: { text: ownerAddress, postalCode: "", country: "JP", region: "", locality: "", street: "", latitude: 0, longitude: 0 },
+          seo: {
+            homeTitle: siteName,
+            homeDescription: "",
+            localTitle: siteName,
+            localDescription: "",
+            aboutDescription: "",
+            productsDescription: "",
+            productsEcDescription: "",
+            projectsTitle: siteName,
+            projectsDescription: "",
+            storesDescription: "",
+            faqDescription: "",
+          },
+          home: { headline: siteName, description: "" },
+          createdAt: serverTimestamp(),
+        },
+        { merge: false }
+      );
+
       // domains コレクションにホスト名を登録
       if (normalizedDomain) {
         await setDoc(doc(db, "domains", normalizedDomain), {

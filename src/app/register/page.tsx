@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FirebaseError } from "firebase/app";
-import { getDoc, doc, setDoc, serverTimestamp } from "firebase/firestore";
+import { getDoc, doc } from "firebase/firestore";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
 import { parsePhoneNumberFromString, AsYouType } from "libphonenumber-js";
@@ -187,67 +187,27 @@ export default function RegisterPage() {
         setupMode: false,
       });
 
-      // siteSettingsEditable を初期化
-      await setDoc(
-        doc(db, "siteSettingsEditable", siteKey),
-        { createdAt: serverTimestamp() },
-        { merge: true }
-      );
-
-      // sites/{siteKey} を初期化（yotteya のデータが漏れないよう主要フィールドを空値で上書き）
+      // サーバーAPIで sites / siteSettingsEditable / domains をまとめて作成（Admin SDK使用）
       const productionUrl = normalizedDomain ? `https://${normalizedDomain}` : "";
-      await setDoc(
-        doc(db, "sites", siteKey),
-        {
+      const tenantRes = await fetch("/api/admin/create-tenant", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
           siteKey,
-          localizedContentMode: "customer-default",
+          siteName,
+          ownerName,
+          ownerPhone,
+          ownerAddress,
+          domain: normalizedDomain || null,
+          wwwEnabled,
           productionUrl,
-          vercelUrl: "",
-          brand: {
-            name: siteName,
-            shortName: siteName,
-            copyrightName: siteName,
-            businessCategory: "",
-            tagline: "",
-            description: "",
-            telephone: ownerPhone,
-            logoPath: "",
-            googleSiteVerification: "",
-            keywords: [],
-          },
-          social: { instagram: "", line: "", x: "", facebook: "", youtube: "", tiktok: "" },
-          address: { text: ownerAddress, postalCode: "", country: "JP", region: "", locality: "", street: "", latitude: 0, longitude: 0 },
-          seo: {
-            homeTitle: siteName,
-            homeDescription: "",
-            localTitle: siteName,
-            localDescription: "",
-            aboutDescription: "",
-            productsDescription: "",
-            productsEcDescription: "",
-            projectsTitle: siteName,
-            projectsDescription: "",
-            storesDescription: "",
-            faqDescription: "",
-          },
-          home: { headline: siteName, description: "" },
-          createdAt: serverTimestamp(),
-        },
-        { merge: false }
-      );
-
-      // domains コレクションにホスト名を登録
+        }),
+      });
+      if (!tenantRes.ok) {
+        const { error } = await tenantRes.json().catch(() => ({ error: "unknown" }));
+        throw new Error(`テナント初期設定の作成に失敗しました: ${error}`);
+      }
       if (normalizedDomain) {
-        await setDoc(doc(db, "domains", normalizedDomain), {
-          siteKey,
-          createdAt: serverTimestamp(),
-        });
-        if (wwwEnabled) {
-          await setDoc(doc(db, "domains", `www.${normalizedDomain}`), {
-            siteKey,
-            createdAt: serverTimestamp(),
-          });
-        }
         setRegisteredDomain(normalizedDomain);
       }
 

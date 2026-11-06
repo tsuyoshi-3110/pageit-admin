@@ -211,6 +211,10 @@ describe("手順ごとの処理", () => {
     assert.equal(fakes.mails[0].to, EMAIL);
     assert.match(fakes.mails[0].html, /oobCode=/);
     assert.match(fakes.mails[0].html, /mode=resetPassword/);
+    // 有料プランは、支払うまで表示されないことと支払い方を案内する
+    assert.match(fakes.mails[0].subject, /お支払いのお願い/);
+    assert.match(fakes.mails[0].html, /サブスク支払いへ進む/);
+    assert.doesNotMatch(fakes.mails[0].html, /公開しました/);
 
     // 完了後に呼んでも何も起きない
     view = await advance(deps, SITE);
@@ -442,6 +446,22 @@ describe("途中失敗からの再開", () => {
     assert.ok(!message.includes("token-xyz"));
     const stored = JSON.stringify(await readRun());
     assert.ok(!stored.includes("sk_live_abc123"));
+  });
+});
+
+describe("案内メールと店舗のアドレス", () => {
+  test("無料プランは公開の案内のままで、支払いを求めない", async () => {
+    await startProvisioning(deps, tenantInput({ plan: "free" }));
+    await runToCompletion();
+    assert.match(fakes.mails[0].subject, /公開しました/);
+    assert.doesNotMatch(fakes.mails[0].html, /支払い/);
+  });
+
+  test("店舗のアドレスをプロジェクトの環境変数に入れる", async () => {
+    await startProvisioning(deps, tenantInput());
+    await runStepsThrough("vercelProject");
+    const project = fakes.vercelState.projects[0];
+    assert.equal(project.envs.get("NEXT_PUBLIC_APP_URL")?.value, `https://${DOMAIN}`);
   });
 });
 

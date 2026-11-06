@@ -215,10 +215,12 @@ function storeEnvVars(run: ProvisioningRun, projectId: string | null, deps: Prov
     plain("PAGEIT_SITE_KEY", run.siteKey),
     // 再開時に、このプロジェクトが今回の処理で作ったものか確かめるために使います
     plain("PAGEIT_PROVISIONING_ID", run.provisioningId),
+    plain("NEXT_PUBLIC_APP_URL", `https://${run.input.domain}`),
   ];
   if (projectId) vars.push(plain("VERCEL_PROJECT_ID", projectId));
   if (deps.config.envMode === "copy") {
     for (const key of deps.config.copyEnvKeys) {
+      if (vars.some((item) => item.key === key)) continue;
       vars.push({
         key,
         value: deps.config.env[key] ?? "",
@@ -487,6 +489,18 @@ function ownerMailHtml(run: ProvisioningRun, passwordLink: string) {
   const siteUrl = `https://${run.input.domain}`;
   const name = escapeHtml(run.input.siteName);
   const email = escapeHtml(run.input.ownerEmail);
+  if (run.input.plan === "paid") {
+    return `
+    <p>${name} のホームページの準備ができました。</p>
+    <p>お支払いが完了するまで、ホームページはお客様に表示されません。次の手順で公開をお願いします。</p>
+    <ol>
+      <li><a href="${escapeHtml(passwordLink)}">パスワードを設定する</a>（リンクには有効期限があります。期限が切れた場合は運営までご連絡ください）</li>
+      <li><a href="${siteUrl}/login">ログイン画面</a>からログインする（ログインID: ${email}）</li>
+      <li>ログイン後の画面で「サブスク支払いへ進む」を押してお支払いをする</li>
+    </ol>
+    <p>公開先: <a href="${siteUrl}">${siteUrl}</a></p>
+  `;
+  }
   return `
     <p>${name} のホームページを公開しました。</p>
     <p>公開先: <a href="${siteUrl}">${siteUrl}</a></p>
@@ -512,7 +526,9 @@ async function ownerMail({ deps, run, saveResources }: StepContext): Promise<Ste
   try {
     await deps.sendMail(
       run.input.ownerEmail,
-      `【Pageit】${run.input.siteName} のホームページを公開しました`,
+      run.input.plan === "paid"
+        ? `【Pageit】${run.input.siteName} のホームページの準備ができました（お支払いのお願い）`
+        : `【Pageit】${run.input.siteName} のホームページを公開しました`,
       ownerMailHtml(run, link)
     );
   } catch (error) {

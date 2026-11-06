@@ -8,6 +8,7 @@ import {
   isSubscriptionCheckout,
   subscriptionFieldsOf,
 } from "@/lib/stripe/subscription-checkout";
+import { addPurchasedCoins, isCoinPurchase } from "@/lib/stripe/coin-purchase";
 import { normalizeLang } from "./i18n";
 import { type LangKey } from "./type";
 import { buyerText } from "./i18n";
@@ -421,6 +422,26 @@ export async function POST(req: NextRequest) {
       };
       shipping_details?: ShippingDetails;
     };
+
+    // XenoCoin の購入も商品の注文ではないため、店舗のコインに足すだけにします
+    if (isCoinPurchase(session)) {
+      try {
+        const siteKey = session.metadata?.siteKey;
+        if (siteKey) {
+          const ref = adminDb.doc(`aiBudgets/${siteKey}`);
+          await adminDb.runTransaction(async (tx) => {
+            const snapshot = await tx.get(ref);
+            const lots = addPurchasedCoins(snapshot.get("lots"), session, new Date());
+            if (lots) tx.set(ref, { lots }, { merge: true });
+          });
+        }
+        await eventRef.set({ type: event.type, created: new Date() }, { merge: true });
+        return new Response("OK", { status: 200 });
+      } catch (err) {
+        console.error("🔥 coin purchase handler error:", safeErr(err));
+        return new Response("retry", { status: 500 });
+      }
+    }
 
     // 月額サブスクは商品の注文ではないため、店舗の設定に記録するだけにします
     if (isSubscriptionCheckout(session)) {

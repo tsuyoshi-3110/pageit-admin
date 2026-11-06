@@ -23,6 +23,13 @@ describe("XenoCoin の購入", () => {
     assert.equal(lots?.[0].expiresAt, "2027-05-06T00:00:00.000Z");
   });
 
+  test("月末の購入でも6か月を超えない", () => {
+    const expiryOf = (iso: string) => addPurchasedCoins([], paid, new Date(iso))?.[0].expiresAt;
+    assert.equal(expiryOf("2026-08-31T03:00:00Z"), "2027-02-28T03:00:00.000Z");
+    // 日本時間の 8/31 0:00 は UTC では 8/30 です
+    assert.equal(expiryOf("2026-08-30T15:00:00Z"), "2027-02-27T15:00:00.000Z");
+  });
+
   test("同じ決済を二重に足さない", () => {
     const lots = addPurchasedCoins([], paid, NOW);
     assert.equal(addPurchasedCoins(lots, paid, NOW), null);

@@ -13,15 +13,6 @@ export type StripePort = {
       options: { idempotencyKey: string }
     ) => Promise<Pick<Stripe.Customer, "id">>;
   };
-  subscriptions: {
-    list: (
-      params: Stripe.SubscriptionListParams
-    ) => Promise<{ data: Pick<Stripe.Subscription, "id" | "metadata">[] }>;
-    create: (
-      params: Stripe.SubscriptionCreateParams,
-      options: { idempotencyKey: string }
-    ) => Promise<Pick<Stripe.Subscription, "id">>;
-  };
 };
 
 export type SendMail = (to: string, subject: string, html: string) => Promise<unknown>;

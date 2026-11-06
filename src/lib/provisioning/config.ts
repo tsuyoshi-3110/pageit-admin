@@ -18,7 +18,6 @@ export type ProvisioningConfig = {
   envMode: EnvMode | null;
   sharedEnvIds: string[];
   copyEnvKeys: string[];
-  stripePriceId: string | null;
   /** copy モードで複製する値の読み取り元 */
   env: Record<string, string | undefined>;
 };
@@ -39,7 +38,6 @@ export function readConfig(env: Env): ProvisioningConfig {
     envMode: mode === "shared" || mode === "copy" || mode === "none" ? mode : null,
     sharedEnvIds: list(env.PROVISION_VERCEL_SHARED_ENV_IDS),
     copyEnvKeys: list(env.PROVISION_VERCEL_COPY_ENV_KEYS),
-    stripePriceId: env.STRIPE_DEFAULT_PRICE_ID?.trim() || null,
     env,
   };
 }
@@ -66,7 +64,6 @@ export function findConfigProblems(env: Env, input: Pick<TenantInput, "plan">): 
   }
   if (input.plan === "paid") {
     need("STRIPE_SECRET_KEY");
-    need("STRIPE_DEFAULT_PRICE_ID");
   }
 
   if (!config.envMode) {

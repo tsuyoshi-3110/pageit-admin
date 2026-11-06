@@ -112,30 +112,7 @@ async function stripe({ deps, run, saveResources }: StepContext): Promise<StepRe
     await saveResources({ stripeCustomerId: customerId });
   }
 
-  if (!run.resources.stripeSubscriptionId) {
-    const priceId = deps.config.stripePriceId;
-    if (!priceId) throw new StepFailure("config-missing", "STRIPE_DEFAULT_PRICE_ID が未設定です。");
-    const existing = await client.subscriptions.list({
-      customer: customerId,
-      status: "all",
-      limit: 100,
-    });
-    const subscriptionId =
-      existing.data.find((item) => item.metadata?.provisioningId === provisioningId)?.id ??
-      (
-        await client.subscriptions.create(
-          {
-            customer: customerId,
-            items: [{ price: priceId }],
-            // 既存の /api/stripe/create-stripe-customer と同じ支払い方式です
-            payment_behavior: "default_incomplete",
-            metadata,
-          },
-          { idempotencyKey: `pageit-provision-${provisioningId}-subscription` }
-        )
-      ).id;
-    await saveResources({ stripeSubscriptionId: subscriptionId });
-  }
+  // サブスクは、オーナーが支払いボタンを押したときに店舗側の料金設定で作られます。
   return { kind: "done" };
 }
 

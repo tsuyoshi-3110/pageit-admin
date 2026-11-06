@@ -16,7 +16,7 @@ export type StepId = (typeof STEP_IDS)[number];
 export const STEP_LABELS: Record<StepId, string> = {
   preflight: "事前確認",
   ownerUser: "オーナーのログインユーザー作成",
-  stripe: "Stripeの顧客とサブスク作成",
+  stripe: "Stripeの顧客作成",
   firestore: "Firestoreの初期データ作成",
   vercelProject: "Vercelプロジェクト作成",
   vercelDomain: "Vercelにドメイン追加",

@@ -83,7 +83,7 @@ function TenantForm({ onStarted }: { onStarted: (run: ProvisioningView) => void 
     }
     setErrors({});
 
-    const billing = plan === "paid" ? "有料（Stripeのサブスクを作成します）" : "無料";
+    const billing = plan === "paid" ? "有料（オーナーの支払い後に公開します）" : "無料";
     const confirmed = window.confirm(
       `この内容で店舗を追加します。\n\n店名: ${parsed.input.siteName}\n店舗キー: ${parsed.input.siteKey}\nドメイン: ${parsed.input.domain}${wwwEnabled ? `（www も追加）` : ""}\nオーナー: ${parsed.input.ownerEmail}\nプラン: ${billing}`
     );
@@ -328,7 +328,10 @@ function RunPanel({
 
         {run.status === "completed" && (
           <p className="text-sm text-emerald-800">
-            公開と案内メールの送信が完了しました: https://{run.input.domain}
+            {run.input.plan === "paid"
+              ? "案内メールを送信しました。オーナーの支払いが済むと公開されます"
+              : "公開と案内メールの送信が完了しました"}
+            : https://{run.input.domain}
           </p>
         )}
 

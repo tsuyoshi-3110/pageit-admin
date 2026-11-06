@@ -28,7 +28,6 @@ export function createFakes() {
   // ---- Stripe ----
   const stripeState = {
     customers: [] as { id: string; email?: string; metadata: Record<string, string> }[],
-    subscriptions: [] as { id: string; customer: string; metadata: Record<string, string> }[],
     idempotency: new Map<string, string>(),
   };
   const stripeOp = (op: string, detail?: unknown) => {
@@ -49,25 +48,6 @@ export function createFakes() {
         stripeState.customers.push({
           id,
           email: params.email,
-          metadata: (params.metadata ?? {}) as Record<string, string>,
-        });
-        stripeState.idempotency.set(idempotencyKey, id);
-        return { id };
-      },
-    },
-    subscriptions: {
-      async list(params) {
-        stripeOp("stripe.subscriptions.list");
-        return { data: stripeState.subscriptions.filter((s) => s.customer === params.customer) as any };
-      },
-      async create(params, { idempotencyKey }) {
-        stripeOp("stripe.subscriptions.create", { idempotencyKey });
-        const known = stripeState.idempotency.get(idempotencyKey);
-        if (known) return { id: known };
-        const id = `sub_fake${stripeState.subscriptions.length + 1}`;
-        stripeState.subscriptions.push({
-          id,
-          customer: params.customer as string,
           metadata: (params.metadata ?? {}) as Record<string, string>,
         });
         stripeState.idempotency.set(idempotencyKey, id);
@@ -287,7 +267,6 @@ export function createFakes() {
   const env: Record<string, string | undefined> = {
     PROVISION_VERCEL_ENV_MODE: "shared",
     PROVISION_VERCEL_SHARED_ENV_IDS: "env_shared_a,env_shared_b",
-    STRIPE_DEFAULT_PRICE_ID: "price_fake",
   };
 
   const fakes = {

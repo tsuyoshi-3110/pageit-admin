@@ -4,6 +4,10 @@ import Stripe from "stripe";
 import { stripeConnect } from "@/lib/stripe-connect";
 import { adminDb } from "@/lib/firebase-admin";
 import { sendMail } from "@/lib/mailer";
+import {
+  isSubscriptionCheckout,
+  subscriptionFieldsOf,
+} from "@/lib/stripe/subscription-checkout";
 import { normalizeLang } from "./i18n";
 import { type LangKey } from "./type";
 import { buyerText } from "./i18n";
@@ -417,6 +421,26 @@ export async function POST(req: NextRequest) {
       };
       shipping_details?: ShippingDetails;
     };
+
+    // 月額サブスクは商品の注文ではないため、店舗の設定に記録するだけにします
+    if (isSubscriptionCheckout(session)) {
+      try {
+        const customerId = typeof session.customer === "string" ? session.customer : null;
+        const siteKey =
+          session.metadata?.siteKey ??
+          (customerId ? await findSiteKeyByCustomerId(customerId) : null);
+        if (siteKey) {
+          await adminDb
+            .doc(`siteSettings/${siteKey}`)
+            .set(subscriptionFieldsOf(session), { merge: true });
+        }
+        await eventRef.set({ type: event.type, created: new Date() }, { merge: true });
+        return new Response("OK", { status: 200 });
+      } catch (err) {
+        console.error("🔥 subscription checkout handler error:", safeErr(err));
+        return new Response("retry", { status: 500 });
+      }
+    }
 
     try {
       // 0) pendingOrders

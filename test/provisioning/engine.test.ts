@@ -129,20 +129,19 @@ describe("手順ごとの処理", () => {
     view = await advance(deps, SITE);
     assert.equal(view?.steps.stripe.status, "done");
     assert.equal(fakes.stripeState.customers.length, 1);
-    assert.equal(fakes.stripeState.subscriptions.length, 1);
+    assert.equal(view?.resources.stripeSubscriptionId, null);
     const stripeKeys = fakes.calls
       .filter((call) => /stripe\.\w+\.create/.test(call.op))
       .map((call) => (call.detail as any).idempotencyKey);
-    assert.equal(stripeKeys.length, 2);
-    assert.ok(stripeKeys.every((key) => key.includes(view!.provisioningId)));
-    assert.notEqual(stripeKeys[0], stripeKeys[1]);
+    assert.equal(stripeKeys.length, 1);
+    assert.ok(stripeKeys[0].includes(view!.provisioningId));
 
     // 4. Firestore
     view = await advance(deps, SITE);
     const settings = (await adminDb.doc(`siteSettings/${SITE}`).get()).data()!;
     assert.equal(settings.ownerId, uid);
     assert.equal(settings.stripeCustomerId, view!.resources.stripeCustomerId);
-    assert.equal(settings.stripeSubscriptionId, view!.resources.stripeSubscriptionId);
+    assert.equal(settings.stripeSubscriptionId, undefined);
     assert.equal(settings.isFreePlan, false);
     assert.deepEqual(settings.industry, { key: "food", name: "飲食" });
     assert.ok((await adminDb.doc(`siteSettingsEditable/${SITE}`).get()).exists);
@@ -262,7 +261,6 @@ describe("手順ごとの処理", () => {
 describe("途中失敗からの再開", () => {
   for (const op of [
     "stripe.customers.create",
-    "stripe.subscriptions.create",
     "vercel.createProject",
     "vercel.upsertEnv",
     "vercel.linkSharedEnv",
@@ -291,7 +289,6 @@ describe("途中失敗からの再開", () => {
       const done = await runPastDeployment({ resume: true });
       assert.equal(done.status, "completed");
       assert.equal(fakes.stripeState.customers.length, 1);
-      assert.equal(fakes.stripeState.subscriptions.length, 1);
       assert.equal(fakes.vercelState.projects.length, 1);
       assert.equal(fakes.vercelState.deployments.length, 1);
       assert.equal(fakes.mails.length, 1);
@@ -317,7 +314,6 @@ describe("途中失敗からの再開", () => {
     fakes.stripeState.idempotency.clear();
     const stripeView = await advance(deps, SITE);
     assert.equal(fakes.stripeState.customers.length, 1);
-    assert.equal(fakes.stripeState.subscriptions.length, 1);
     assert.equal(opCount("stripe.customers.create"), createsBefore);
     assert.equal(stripeView?.resources.stripeCustomerId, "cus_fake1");
 

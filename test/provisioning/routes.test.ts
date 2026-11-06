@@ -186,7 +186,7 @@ describe("API", () => {
 
     assert.equal(fakes.vercelState.projects.length, 1);
     assert.equal(fakes.vercelState.deployments.length, 1);
-    assert.equal(fakes.stripeState.subscriptions.length, 1);
+    assert.equal(fakes.stripeState.customers.length, 1);
     assert.equal(fakes.mails.length, 1);
 
     const owner = await adminAuth.getUserByEmail("owner@sakura-bakery.example");

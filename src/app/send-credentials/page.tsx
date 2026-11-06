@@ -1,5 +1,6 @@
 "use client";
 
+import { authedFetch } from "@/lib/authedFetch";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,7 +26,7 @@ export default function SendCredentialsPage() {
     setLoading(true);
     setMessage("");
 
-    const res = await fetch("/api/send-credentials", {
+    const res = await authedFetch("/api/send-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),

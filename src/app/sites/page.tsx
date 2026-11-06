@@ -1,6 +1,7 @@
 // components/.../SiteListPage.tsx
 "use client";
 
+import { authedFetch } from "@/lib/authedFetch";
 import { useEffect, useMemo, useState } from "react";
 import {
   collection,
@@ -217,8 +218,7 @@ export default function SiteListPage() {
         const withStatus: Site[] = await Promise.all(
           baseList.map(async (site) => {
             try {
-              const res = await fetch(
-                `/api/stripe/check-subscription?siteKey=${site.id}`
+              const res = await authedFetch(`/api/stripe/check-subscription?siteKey=${site.id}`
               );
               const { status } = (await res.json()) as {
                 status: PaymentStatus;
@@ -448,7 +448,7 @@ export default function SiteListPage() {
         setLoadingProgress(null);
         setLoadingOverlay(true);
 
-        const res = await fetch("/api/payouts/release-site", {
+        const res = await authedFetch("/api/payouts/release-site", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ siteKey: siteId, force: false, limit: 100 }),
@@ -484,7 +484,7 @@ export default function SiteListPage() {
     setLoadingProgress(null);
     setLoadingOverlay(true);
     try {
-      const res = await fetch("/api/payouts/release-site", {
+      const res = await authedFetch("/api/payouts/release-site", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ siteKey: siteId, force, limit: 50 }),
@@ -554,7 +554,7 @@ export default function SiteListPage() {
   async function handleCancel(siteId: string) {
     if (!confirm("本当に解約しますか？次回請求以降課金されません。")) return;
     try {
-      const res = await fetch("/api/stripe/cancel-subscription", {
+      const res = await authedFetch("/api/stripe/cancel-subscription", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ siteKey: siteId }),

@@ -1,6 +1,7 @@
 // app/api/payouts/cron/route.ts
 import { NextRequest } from "next/server";
 import { randomUUID } from "node:crypto";
+import { isCronRequest } from "@/app/api/_utils/auth";
 import { adminDb } from "@/lib/firebase-admin";
 import { stripeConnect } from "@/lib/stripe-connect";
 import type Stripe from "stripe";
@@ -12,14 +13,6 @@ const MAX_RELEASE_PER_RUN = Number(process.env.PAYOUT_CRON_LIMIT ?? 100);
 const IDEM_MISMATCH_RE =
   /Keys for idempotent requests can only be used with the same parameters/i;
 
-function isAuthorized(req: NextRequest) {
-  const hdr = req.headers.get("authorization") || "";
-  const bearer = hdr.replace(/^Bearer\s+/i, "").trim();
-  const keyParam = req.nextUrl.searchParams.get("key") || "";
-  const secret = process.env.CRON_SECRET || "";
-  if (!secret) return true;
-  return bearer === secret || keyParam === secret;
-}
 
 export async function GET(req: NextRequest) {
   return POST(req);
@@ -50,7 +43,7 @@ export async function POST(req: NextRequest) {
 
   log("start", { limit: MAX_RELEASE_PER_RUN, path: req.nextUrl.pathname });
 
-  if (!isAuthorized(req)) {
+  if (!isCronRequest(req)) {
     log("unauthorized");
     return new Response("forbidden", { status: 403 });
   }

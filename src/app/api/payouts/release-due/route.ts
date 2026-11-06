@@ -1,4 +1,5 @@
 // app/api/payouts/release-due/route.ts
+import { requireAdminOrCron } from "@/app/api/_utils/auth";
 import { adminDb } from "@/lib/firebase-admin";
 import { stripeConnect } from "@/lib/stripe-connect";
 
@@ -6,6 +7,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const denied = await requireAdminOrCron(req);
+  if (denied) return denied;
+
   const url = new URL(req.url);
   const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") ?? 50)));
   const now = new Date();

@@ -1,3 +1,4 @@
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { adminDb } from "@/lib/firebase-admin";
 import { stripeConnect } from "@/lib/stripe-connect";
 import type Stripe from "stripe";
@@ -11,6 +12,9 @@ function isIdempotencyMismatch(e: unknown) {
 }
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   // --- 入力 ---
   let body: any = {};
   try {

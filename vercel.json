@@ -3,7 +3,7 @@
   "version": 2,
   "crons": [
     {
-      "path": "/api/payouts/cron?key=pageitAdminSecret_ThisShouldBeLongAndRandom_9Jp0xKf2uWv",
+      "path": "/api/payouts/cron",
       "schedule": "0 9 * * *"
     }
   ]

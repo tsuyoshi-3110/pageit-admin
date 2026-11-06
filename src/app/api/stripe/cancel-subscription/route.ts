@@ -1,9 +1,13 @@
 // src/app/api/admin/cancel-subscription/route.ts
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { stripe } from "@/lib/stripe";
 import { adminDb } from "@/lib/firebase-admin";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   try {
     const { siteKey } = await req.json();
     if (!siteKey) {

@@ -1,5 +1,6 @@
 "use client";
 
+import { authedFetch } from "@/lib/authedFetch";
 import { useEffect, useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -225,7 +226,7 @@ export default function SendTransferPage() {
       setSending(true);
 
       // 既存APIに「選択したものだけ true」で渡す
-      await fetch("/api/send-email", {
+      await authedFetch("/api/send-email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

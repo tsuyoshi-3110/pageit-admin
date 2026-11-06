@@ -1,13 +1,16 @@
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   try {
     const {
       siteKey,
       siteName,
-      ownerName,
       ownerPhone,
       ownerAddress,
       domain,
@@ -17,6 +20,18 @@ export async function POST(req: Request) {
 
     if (!siteKey || !siteName) {
       return NextResponse.json({ error: "missing-fields" }, { status: 400 });
+    }
+
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(siteKey)) {
+      return NextResponse.json({ error: "invalid-site-key" }, { status: 400 });
+    }
+    if ((await adminDb.doc(`sites/${siteKey}`).get()).exists) {
+      return NextResponse.json({ error: "site-already-exists" }, { status: 409 });
+    }
+    for (const host of domain ? [domain, ...(wwwEnabled ? [`www.${domain}`] : [])] : []) {
+      if ((await adminDb.doc(`domains/${host}`).get()).exists) {
+        return NextResponse.json({ error: "domain-already-registered" }, { status: 409 });
+      }
     }
 
     const batch = adminDb.batch();

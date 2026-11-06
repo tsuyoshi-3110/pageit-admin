@@ -1,5 +1,6 @@
 export const runtime = "nodejs";
 
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { NextRequest, NextResponse } from "next/server";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
@@ -17,6 +18,9 @@ const INVOICE_ID = "T4120001209252";
 const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
 
 export async function POST(req: NextRequest) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   try {
     const {
       to,

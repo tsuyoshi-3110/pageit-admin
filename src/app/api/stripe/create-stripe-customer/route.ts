@@ -1,9 +1,13 @@
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { NextResponse } from "next/server";
 import { stripe } from "@/lib/stripe";
 
 
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   try {
     const { email, name, metadata } = await req.json();
 

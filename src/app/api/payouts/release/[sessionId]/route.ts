@@ -1,4 +1,5 @@
 // app/api/payouts/release/[sessionId]/route.ts
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { adminDb } from "@/lib/firebase-admin";
 import { stripeConnect } from "@/lib/stripe-connect";
 
@@ -6,6 +7,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   // ← ルートの第2引数は使わず、URL から動的セグメントを取得
   const url = new URL(req.url);
   const parts = url.pathname.split("/");

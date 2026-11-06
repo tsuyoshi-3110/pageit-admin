@@ -2,11 +2,15 @@
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 
 // GET /api/admin/orders/list?siteKey=xxx&from=2025-09-01&to=2025-10-01&limit=50&cursor=...
 export async function GET(req: NextRequest) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   try {
     const { searchParams } = new URL(req.url);
     const siteKey = searchParams.get("siteKey") || "";

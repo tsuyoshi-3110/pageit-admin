@@ -1,7 +1,11 @@
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { NextResponse } from "next/server";
 import { adminAuth } from "@/lib/firebase-admin";
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { email, password } = await req.json();
 
   try {

@@ -1,7 +1,11 @@
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { NextRequest, NextResponse } from "next/server";
 import { stripe } from "@/lib/stripe";
 
 export async function GET(req: NextRequest) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const sessionId = req.nextUrl.searchParams.get("session_id");
   if (!sessionId) return NextResponse.json({ status: "none" }, { status: 400 });
 

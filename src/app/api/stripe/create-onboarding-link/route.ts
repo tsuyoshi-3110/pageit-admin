@@ -1,4 +1,5 @@
 // src/app/api/stripe/create-onboarding-link/route.ts
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { NextRequest, NextResponse } from "next/server";
 import { stripeConnect } from "@/lib/stripe-connect";
 import { adminDb } from "@/lib/firebase-admin";
@@ -61,17 +62,12 @@ export async function POST(req: NextRequest) {
   let step = "[create-onboarding-link] start";
 
   try {
-    // ---- （任意）Bearer 認証 ----
-    const requiredToken = process.env.ADMIN_API_TOKEN;
-    if (requiredToken) {
-      const auth = req.headers.get("authorization") || "";
-      const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-      if (token !== requiredToken) {
-        return withCORS(
-          req,
-          NextResponse.json({ error: "unauthorized" }, { status: 401 })
-        );
-      }
+    const denied = await requireAdmin(req);
+    if (denied) {
+      return withCORS(
+        req,
+        NextResponse.json(await denied.json(), { status: denied.status })
+      );
     }
 
     step = "[request] parse";

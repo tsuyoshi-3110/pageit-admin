@@ -1,4 +1,5 @@
 // src/app/api/check-subscription/route.ts
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { NextRequest, NextResponse } from "next/server";
 import { stripe } from "@/lib/stripe";
 import { adminDb } from "@/lib/firebase-admin";
@@ -67,6 +68,9 @@ async function findCustomerIdByEmail(email?: string | null) {
 }
 
 export async function GET(req: NextRequest) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { searchParams } = new URL(req.url);
   const siteKey = searchParams.get("siteKey");
   const fix = searchParams.get("fix") === "1"; // true で自己修復を許可

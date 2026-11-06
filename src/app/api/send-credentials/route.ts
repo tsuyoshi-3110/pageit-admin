@@ -1,4 +1,5 @@
 // app/api/send-credentials/route.ts
+import { requireAdmin } from "@/app/api/_utils/auth";
 import { google } from "googleapis";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -11,6 +12,9 @@ const {
 } = process.env;
 
 export async function POST(req: NextRequest) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { email, password } = await req.json();
 
   if (!email || !password) {

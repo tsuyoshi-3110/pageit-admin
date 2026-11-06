@@ -1,6 +1,7 @@
 // 修正された RegisterPage：Stripe 連携 + 業種登録対応
 "use client";
 
+import { authedFetch } from "@/lib/authedFetch";
 import { useEffect, useState } from "react";
 import { auth, db } from "../../lib/firebase";
 import { createSiteSettings } from "../../lib/createSiteSettings";
@@ -109,17 +110,12 @@ export default function RegisterPage() {
       const ref = doc(db, "siteSettings", siteKey);
       const snap = await getDoc(ref);
       if (snap.exists()) {
-        const confirmOverwrite = window.confirm(
-          "この siteKey はすでに使われています。上書きしてもよろしいですか？"
-        );
-        if (!confirmOverwrite) {
-          alert("登録をキャンセルしました。");
-          return;
-        }
+        alert("この siteKey はすでに使われています。別の siteKey を指定してください。");
+        return;
       }
 
       // ✅ サーバー側でFirebase Auth ユーザー作成（自動ログイン防止）
-      const userRes = await fetch("/api/create-firebase-user", {
+      const userRes = await authedFetch("/api/create-firebase-user", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
@@ -146,7 +142,7 @@ export default function RegisterPage() {
 
       // Stripe 顧客作成（無料プランでない場合）
       if (!isFreePlan) {
-        const stripeRes = await fetch("/api/stripe/create-stripe-customer", {
+        const stripeRes = await authedFetch("/api/stripe/create-stripe-customer", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -189,7 +185,7 @@ export default function RegisterPage() {
 
       // サーバーAPIで sites / siteSettingsEditable / domains をまとめて作成（Admin SDK使用）
       const productionUrl = normalizedDomain ? `https://${normalizedDomain}` : "";
-      const tenantRes = await fetch("/api/admin/create-tenant", {
+      const tenantRes = await authedFetch("/api/admin/create-tenant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

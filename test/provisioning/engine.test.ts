@@ -445,6 +445,106 @@ describe("途中失敗からの再開", () => {
   });
 });
 
+describe("DNS確認の応答がないとき", () => {
+  async function runToDns() {
+    await startProvisioning(deps, tenantInput());
+    await runStepsThrough("deployment");
+  }
+
+  test("失敗にせず値を案内し、次の確認で完了できる", async () => {
+    await runToDns();
+    fakes.vercelState.domainConfigTimeouts = 2;
+    let view = await advance(deps, SITE);
+    assert.equal(view?.status, "waiting");
+    assert.equal(view?.steps.dns.error, null);
+    const hosts = view?.resources.dns?.hosts ?? [];
+    assert.deepEqual(hosts.map((item) => item.host), [DOMAIN, `www.${DOMAIN}`]);
+    assert.deepEqual(hosts[0].records[0], { type: "A", name: "@", value: "76.76.21.21" });
+    assert.deepEqual(hosts[1].records[0], { type: "CNAME", name: "www", value: "cname.vercel-dns.com." });
+    assert.ok(hosts.every((item) => item.misconfigured));
+
+    fakes.vercelState.dnsReady = true;
+    view = await advance(deps, SITE);
+    assert.equal(view?.steps.dns.status, "done");
+  });
+
+  test("確認できない間は、反映済みでも完了にしない", async () => {
+    await runToDns();
+    fakes.vercelState.dnsReady = true;
+    fakes.vercelState.domainConfigTimeouts = 1;
+    const view = await advance(deps, SITE);
+    assert.equal(view?.status, "waiting");
+    assert.equal(view?.steps.dns.status, "waiting");
+    assert.equal(fakes.mails.length, 0);
+    assert.equal((await adminDb.doc(`sites/${SITE}`).get()).get("domainStatus"), "pending_dns");
+  });
+
+  test("一度案内した値は、確認できない回も変えない", async () => {
+    await runToDns();
+    await advance(deps, SITE);
+    fakes.vercelState.domainConfigTimeouts = 2;
+    const view = await advance(deps, SITE);
+    const hosts = view?.resources.dns?.hosts ?? [];
+    assert.equal(hosts[0].records[0].value, "76.76.21.241");
+    assert.equal(hosts[1].records[0].value, "fake.vercel-dns-017.com.");
+  });
+
+  test("Vercelの5xxも待ち状態にする", async () => {
+    await runToDns();
+    fakes.failOnce("vercel.getDomainConfig");
+    const view = await advance(deps, SITE);
+    assert.equal(view?.status, "waiting");
+    assert.equal(view?.steps.dns.error, null);
+  });
+
+  test("権限エラーは隠さず失敗として見せる", async () => {
+    await runToDns();
+    fakes.failOnce("vercel.getDomainConfig", "権限がありません", 403, "forbidden");
+    const view = await advance(deps, SITE);
+    assert.equal(view?.status, "failed");
+    assert.equal(view?.steps.dns.error?.code, "vercel-forbidden");
+  });
+
+  test("複数のドメインを同時に確認する", async () => {
+    await runToDns();
+    const original = deps.vercel.getDomainConfig;
+    let active = 0;
+    let peak = 0;
+    deps = {
+      ...deps,
+      vercel: {
+        ...deps.vercel,
+        getDomainConfig: async (host: string, projectId: string) => {
+          active += 1;
+          peak = Math.max(peak, active);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          active -= 1;
+          return original(host, projectId);
+        },
+      },
+    };
+    await advance(deps, SITE);
+    assert.equal(peak, 2);
+  });
+
+  test("DNS確認だけ長い時間制限で呼び出す", async () => {
+    await runToDns();
+    const realTimeout = AbortSignal.timeout;
+    const limits: number[] = [];
+    AbortSignal.timeout = (ms: number) => {
+      limits.push(ms);
+      return realTimeout.call(AbortSignal, ms);
+    };
+    try {
+      await advance(deps, SITE);
+    } finally {
+      AbortSignal.timeout = realTimeout;
+    }
+    assert.ok(limits.includes(15_000));
+    assert.equal(limits.filter((ms) => ms === 40_000).length, 2);
+  });
+});
+
 describe("上書き拒否", () => {
   const blockers: [string, () => Promise<unknown>, string][] = [
     ["sites", () => adminDb.doc(`sites/${SITE}`).set({ keep: true }), "siteKey"],

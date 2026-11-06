@@ -5,7 +5,7 @@ import type { ProvisioningDeps } from "./deps";
 import { hostsOf, projectNameOf } from "./input";
 import { findConflicts } from "./preflight";
 import type { DnsHostStatus, DnsRecord, ProvisioningRun, Resources, StepId } from "./types";
-import { isVercelApiError, type VercelEnvVar } from "./vercel-client";
+import { isVercelApiError, type VercelDomainConfig, type VercelEnvVar } from "./vercel-client";
 
 /** 手順を止める失敗です。message はそのまま画面に出します。 */
 export class StepFailure extends Error {
@@ -388,50 +388,76 @@ function firstRanked<T extends { rank: number }>(items: T[] | undefined) {
   return [...(items ?? [])].sort((a, b) => a.rank - b.rank)[0];
 }
 
-async function dns({ deps, run, saveResources }: StepContext): Promise<StepResult> {
+/** Vercel側の一時的な不調（応答なし・接続失敗・5xx）かどうかを判定します。権限エラーなどは含めません。 */
+function isTemporaryVercelError(error: unknown) {
+  return isVercelApiError(error) && (error.status === 0 || error.status >= 500);
+}
+
+async function checkDnsHost(
+  { deps, run }: Pick<StepContext, "deps" | "run">,
+  projectId: string,
+  host: string
+): Promise<DnsHostStatus> {
   const { vercel } = deps;
-  const projectId = requireProjectId(run);
-  const hosts: DnsHostStatus[] = [];
-
-  for (const host of hostsOf(run.input)) {
-    let domain = await vercel.getProjectDomain(projectId, host);
-    if (!domain) {
-      throw new StepFailure("vercel-domain-missing", `ドメイン「${host}」がVercelプロジェクトにありません。`);
-    }
-    if (!domain.verified) {
-      try {
-        domain = await vercel.verifyProjectDomain(projectId, host);
-      } catch (error) {
-        // 未反映のときは 400 が返ります。待ち状態として扱います。
-        if (!isVercelApiError(error) || error.status !== 400) throw error;
-      }
-    }
-    const config = await vercel.getDomainConfig(host, projectId);
-
-    const isApex = domain.apexName === host;
-    const records: DnsRecord[] = isApex
-      ? [{
-          type: "A",
-          name: "@",
-          value: firstRanked(config.recommendedIPv4)?.value?.[0] ?? FALLBACK_IPV4,
-        }]
-      : [{
-          type: "CNAME",
-          name: host.slice(0, -(domain.apexName.length + 1)),
-          value: firstRanked(config.recommendedCNAME)?.value ?? FALLBACK_CNAME,
-        }];
-    if (!domain.verified) {
-      for (const challenge of domain.verification ?? []) {
-        records.push({ type: challenge.type, name: challenge.domain, value: challenge.value });
-      }
-    }
-    hosts.push({
-      host,
-      verified: domain.verified,
-      misconfigured: config.misconfigured,
-      records,
-    });
+  let domain = await vercel.getProjectDomain(projectId, host);
+  if (!domain) {
+    throw new StepFailure("vercel-domain-missing", `ドメイン「${host}」がVercelプロジェクトにありません。`);
   }
+  if (!domain.verified) {
+    try {
+      domain = await vercel.verifyProjectDomain(projectId, host);
+    } catch (error) {
+      // 未反映のときは 400 が返ります。待ち状態として扱います。
+      if (!isVercelApiError(error) || error.status !== 400) throw error;
+    }
+  }
+
+  // 確認できないときも設定する値は案内できるため、止めずに「未反映」として扱います。
+  let config: VercelDomainConfig | null = null;
+  try {
+    config = await vercel.getDomainConfig(host, projectId);
+  } catch (error) {
+    if (!isTemporaryVercelError(error)) throw error;
+    console.warn(`[provisioning] ${run.siteKey} DNS確認を次回に持ち越します: ${host}`);
+  }
+
+  const isApex = domain.apexName === host;
+  const type = isApex ? "A" : "CNAME";
+  // 確認できなかった回に表示の値が変わらないよう、前回の値を優先します
+  const previous = run.resources.dns?.hosts
+    .find((item) => item.host === host)
+    ?.records.find((record) => record.type === type)?.value;
+  const records: DnsRecord[] = isApex
+    ? [{
+        type,
+        name: "@",
+        value: firstRanked(config?.recommendedIPv4)?.value?.[0] ?? previous ?? FALLBACK_IPV4,
+      }]
+    : [{
+        type,
+        name: host.slice(0, -(domain.apexName.length + 1)),
+        value: firstRanked(config?.recommendedCNAME)?.value ?? previous ?? FALLBACK_CNAME,
+      }];
+  if (!domain.verified) {
+    for (const challenge of domain.verification ?? []) {
+      records.push({ type: challenge.type, name: challenge.domain, value: challenge.value });
+    }
+  }
+  return {
+    host,
+    verified: domain.verified,
+    // 確認できなかった場合は反映済みにしません
+    misconfigured: config?.misconfigured ?? true,
+    records,
+  };
+}
+
+async function dns({ deps, run, saveResources }: StepContext): Promise<StepResult> {
+  const projectId = requireProjectId(run);
+  // 確認に20秒ほどかかるため、関数の上限に収まるよう同時に調べます
+  const hosts = await Promise.all(
+    hostsOf(run.input).map((host) => checkDnsHost({ deps, run }, projectId, host))
+  );
 
   await saveResources({ dns: { checkedAt: deps.now().toISOString(), hosts } });
   const ready = hosts.every((item) => item.verified && !item.misconfigured);

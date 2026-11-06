@@ -2,6 +2,8 @@
 
 const BASE_URL = "https://api.vercel.com";
 const TIMEOUT_MS = 15_000;
+/** DNSを実際に調べるAPIは、実測で18〜22秒かかります。関数の上限（60秒）に収まる長さにしています。 */
+const DOMAIN_CONFIG_TIMEOUT_MS = 40_000;
 
 export class VercelApiError extends Error {
   constructor(
@@ -75,7 +77,11 @@ export function createVercelClient({
   async function request<T>(
     method: string,
     path: string,
-    { query, body }: { query?: Record<string, string>; body?: unknown } = {}
+    {
+      query,
+      body,
+      timeoutMs = TIMEOUT_MS,
+    }: { query?: Record<string, string>; body?: unknown; timeoutMs?: number } = {}
   ): Promise<T> {
     const url = new URL(path, BASE_URL);
     for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
@@ -91,7 +97,7 @@ export function createVercelClient({
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
         cache: "no-store",
       });
     } catch (error) {
@@ -198,6 +204,7 @@ export function createVercelClient({
     getDomainConfig: (host: string, projectId: string) =>
       request<VercelDomainConfig>("GET", `/v6/domains/${encodeURIComponent(host)}/config`, {
         query: { projectIdOrName: projectId },
+        timeoutMs: DOMAIN_CONFIG_TIMEOUT_MS,
       }),
 
     async createDeployment(body: {

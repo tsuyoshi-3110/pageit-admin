@@ -102,6 +102,8 @@ export function createFakes() {
     nextDeployResult: "READY",
     /** DNSが反映済みか */
     dnsReady: false,
+    /** DNS確認APIが応答しない回数（テスト用） */
+    domainConfigTimeouts: 0,
     /** 指定回数の確認後にDNSを反映済みにします（ローカル検証用） */
     dnsChecksUntilReady: null as number | null,
     /** 本番ブランチAPIが効かない状況の再現 */
@@ -213,6 +215,12 @@ export function createFakes() {
       return json(200, domainJson(domain));
     }
     if ((m = route(/^\/v6\/domains\/([^/]+)\/config$/))) {
+      const failed = op("vercel.getDomainConfig");
+      if (failed) return failed;
+      if (vercelState.domainConfigTimeouts > 0) {
+        vercelState.domainConfigTimeouts -= 1;
+        throw new DOMException("timed out", "TimeoutError");
+      }
       if (vercelState.dnsChecksUntilReady !== null && !vercelState.dnsReady) {
         vercelState.dnsChecksUntilReady -= 1;
         if (vercelState.dnsChecksUntilReady <= 0) vercelState.dnsReady = true;

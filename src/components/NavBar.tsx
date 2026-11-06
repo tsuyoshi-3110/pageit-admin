@@ -83,6 +83,13 @@ export default function NavBar() {
                     アカウント作成
                   </Link>
                   <Link
+                    href="/tenants/new"
+                    onClick={toggleMenu}
+                    className="text-gray-700 hover:text-blue-500"
+                  >
+                    新規店舗の追加
+                  </Link>
+                  <Link
                     href="/sites"
                     onClick={toggleMenu}
                     className="text-gray-700 hover:text-blue-500"

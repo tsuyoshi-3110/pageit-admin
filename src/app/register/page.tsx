@@ -15,24 +15,7 @@ import { onAuthStateChanged } from "firebase/auth";
 import { parsePhoneNumberFromString, AsYouType } from "libphonenumber-js";
 import validator from "validator";
 import { handleSearchAddress } from "@/lib/addressUtil";
-
-type IndustryOption = { value: string; label: string };
-
-// 業種のプリセット（必要に応じて増減OK）
-const INDUSTRY_OPTIONS: IndustryOption[] = [
-  { value: "food", label: "飲食" },
-  { value: "retail", label: "小売" },
-  { value: "beauty", label: "美容・サロン" },
-  { value: "medical", label: "医療・介護" },
-  { value: "construction", label: "建設・不動産" },
-  { value: "it", label: "IT・ソフトウェア" },
-  { value: "education", label: "教育・スクール" },
-  { value: "logistics", label: "物流・運輸" },
-  { value: "manufacturing", label: "製造" },
-  { value: "professional", label: "士業" },
-  { value: "service", label: "サービス" },
-  { value: "other", label: "その他" },
-];
+import { INDUSTRY_OPTIONS } from "@/lib/industries";
 
 export default function RegisterPage() {
   const [email, setEmail] = useState("");

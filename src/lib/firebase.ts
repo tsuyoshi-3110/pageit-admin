@@ -1,8 +1,8 @@
 // src/lib/firebase.ts
 
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { connectAuthEmulator, getAuth } from "firebase/auth";
+import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
@@ -19,4 +19,13 @@ const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+
+// ローカル検証専用。未設定の本番では何もしません。
+const authEmulatorUrl = process.env.NEXT_PUBLIC_FIREBASE_AUTH_EMULATOR_URL;
+const firestoreEmulatorPort = process.env.NEXT_PUBLIC_FIRESTORE_EMULATOR_PORT;
+if (authEmulatorUrl && firestoreEmulatorPort) {
+  connectAuthEmulator(auth, authEmulatorUrl, { disableWarnings: true });
+  connectFirestoreEmulator(db, "127.0.0.1", Number(firestoreEmulatorPort));
+}
+
 export const storage = getStorage(app);

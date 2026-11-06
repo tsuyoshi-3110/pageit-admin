@@ -2,6 +2,7 @@ import { requireAdmin } from "@/app/api/_utils/auth";
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
+import { buildInitialSiteDocument } from "@/lib/tenantDocs";
 
 export async function POST(req: Request) {
   const denied = await requireAdmin(req);
@@ -47,47 +48,13 @@ export async function POST(req: Request) {
     batch.set(
       adminDb.doc(`sites/${siteKey}`),
       {
-        siteKey,
-        localizedContentMode: "customer-default",
-        productionUrl: productionUrl ?? "",
-        vercelUrl: "",
-        brand: {
-          name: siteName,
-          shortName: siteName,
-          copyrightName: siteName,
-          businessCategory: "",
-          tagline: "",
-          description: "",
+        ...buildInitialSiteDocument({
+          siteKey,
+          siteName,
+          productionUrl: productionUrl ?? "",
           telephone: ownerPhone ?? "",
-          logoPath: "",
-          googleSiteVerification: "",
-          keywords: [],
-        },
-        social: { instagram: "", line: "", x: "", facebook: "", youtube: "", tiktok: "" },
-        address: {
-          text: ownerAddress ?? "",
-          postalCode: "",
-          country: "JP",
-          region: "",
-          locality: "",
-          street: "",
-          latitude: 0,
-          longitude: 0,
-        },
-        seo: {
-          homeTitle: siteName,
-          homeDescription: "",
-          localTitle: siteName,
-          localDescription: "",
-          aboutDescription: "",
-          productsDescription: "",
-          productsEcDescription: "",
-          projectsTitle: siteName,
-          projectsDescription: "",
-          storesDescription: "",
-          faqDescription: "",
-        },
-        home: { headline: siteName, description: "" },
+          addressText: ownerAddress ?? "",
+        }),
         createdAt: FieldValue.serverTimestamp(),
       }
     );

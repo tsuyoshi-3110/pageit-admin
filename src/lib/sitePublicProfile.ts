@@ -33,14 +33,11 @@ export async function syncSitePublicProfile(siteKey: string) {
   const fields = CONTACT_PUBLIC_SITE_KEYS.has(siteKey)
     ? [...SHARED_FIELDS, ...CONTACT_FIELDS]
     : SHARED_FIELDS;
-  const profile: Record<string, unknown> = {
-    hasActiveSubscription: !!settings.stripeSubscriptionId,
-    updatedAt: serverTimestamp(),
-  };
+  const profile: Record<string, unknown> = { updatedAt: serverTimestamp() };
   for (const field of fields) {
     if (settings[field] !== undefined) profile[field] = settings[field];
   }
-  await setDoc(doc(db, "sitePublicProfile", siteKey), profile);
+  await setDoc(doc(db, "sitePublicProfile", siteKey), profile, { merge: true });
 }
 
 export async function deleteSitePublicProfile(siteKey: string) {

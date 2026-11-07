@@ -1,6 +1,7 @@
 // lib/createSiteSettings.ts
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "./firebase";
+import { syncSitePublicProfile } from "./sitePublicProfile";
 
 /** 業種情報（任意） */
 export type IndustryInfo = {
@@ -66,6 +67,7 @@ export async function createSiteSettings(
     },
     { merge: true }
   );
+  await syncSitePublicProfile(siteId);
 
   return true;
 }

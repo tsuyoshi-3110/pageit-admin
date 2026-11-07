@@ -15,6 +15,7 @@ import {
   where,
   setDoc,
 } from "firebase/firestore";
+import { deleteSitePublicProfile, syncSitePublicProfile } from "@/lib/sitePublicProfile";
 import { db } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "@/lib/firebase";
@@ -532,6 +533,7 @@ export default function SiteListPage() {
         homepageUrl: homepageInput,
         updatedAt: Timestamp.now(),
       });
+      await syncSitePublicProfile(siteId);
 
       setSites((prev) =>
         prev.map((s) =>
@@ -574,6 +576,7 @@ export default function SiteListPage() {
       return;
     try {
       await deleteDoc(doc(db, "siteSettings", siteId));
+      await deleteSitePublicProfile(siteId);
       setSites((prev) => prev.filter((s) => s.id !== siteId));
     } catch (e) {
       console.error("handleDelete error:", e);
@@ -603,6 +606,7 @@ export default function SiteListPage() {
           : null,
         updatedAt: Timestamp.now(),
       });
+      await syncSitePublicProfile(siteId);
 
       setSites((prev) =>
         prev.map((s) =>
@@ -1168,6 +1172,7 @@ export default function SiteListPage() {
                         setupMode: newVal,
                         updatedAt: Timestamp.now(),
                       });
+                      await syncSitePublicProfile(site.id);
                       setSites((prev) =>
                         prev.map((s) =>
                           s.id === site.id ? { ...s, setupMode: newVal } : s

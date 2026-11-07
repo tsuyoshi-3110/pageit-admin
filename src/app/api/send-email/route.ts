@@ -14,7 +14,6 @@ const {
   GOOGLE_REDIRECT_URI = "https://developers.google.com/oauthplayground",
 } = process.env;
 
-const INVOICE_ID = "T4120001209252";
 const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
 
 export async function POST(req: NextRequest) {
@@ -86,7 +85,6 @@ export async function POST(req: NextRequest) {
     // PDF生成
     const pdfBytes = await createInvoicePdf({
       customerName: name,
-      invoiceNumber: INVOICE_ID,
       invoiceDate: invDate,
       dueDate: dueDateJP,
       logoPath: `${baseUrl}/images/xenoLogo.png`,
@@ -122,7 +120,7 @@ export async function POST(req: NextRequest) {
       subject,
       text:
         body ??
-        `${name} 様\n\n請求書（インボイス登録番号：${INVOICE_ID}）を添付いたしますのでご確認ください。\n` +
+        `${name} 様\n\n請求書を添付いたしますのでご確認ください。\n` +
           `ご不明点がありましたらお気軽にご連絡ください。`,
       attachments: [
         {

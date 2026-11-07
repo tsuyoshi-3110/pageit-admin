@@ -6,7 +6,8 @@ export type InvoiceItem = { label: string; unitPrice: number; qty: number };
 
 export type InvoiceParams = {
   customerName: string;
-  invoiceNumber: string;
+  /** 適格請求書発行事業者の登録番号。未登録の間は渡しません。 */
+  invoiceNumber?: string;
   invoiceDate: string;
   dueDate: string;
   logoPath: string; // URL
@@ -62,12 +63,14 @@ export async function createInvoicePdf(p: InvoiceParams): Promise<Uint8Array> {
     size: 30,
     font: jpFont,
   });
-  page.drawText(`登録番号-${p.invoiceNumber}`, {
-    x: LEFT,
-    y: height - 70,
-    size: 12,
-    font: jpFont,
-  });
+  if (p.invoiceNumber) {
+    page.drawText(`登録番号-${p.invoiceNumber}`, {
+      x: LEFT,
+      y: height - 70,
+      size: 12,
+      font: jpFont,
+    });
+  }
 
   // 請求情報
   let yPos = height - HEADER_H - 45;

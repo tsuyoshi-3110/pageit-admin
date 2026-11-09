@@ -12,7 +12,6 @@ export async function POST(req: Request) {
     const {
       siteKey,
       siteName,
-      ownerPhone,
       ownerAddress,
       domain,
       wwwEnabled,
@@ -52,7 +51,9 @@ export async function POST(req: Request) {
           siteKey,
           siteName,
           productionUrl: productionUrl ?? "",
-          telephone: ownerPhone ?? "",
+          // 登録時の電話番号は運営との連絡用（siteSettings.ownerPhone に保存）。
+          // 携帯番号のことが多いので、店の電話番号にはせず、公開しません。
+          // 公開する番号は、オーナーが店舗一覧で自分で登録します。
           addressText: ownerAddress ?? "",
         }),
         createdAt: FieldValue.serverTimestamp(),

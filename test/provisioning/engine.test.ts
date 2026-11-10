@@ -145,6 +145,10 @@ describe("手順ごとの処理", () => {
     assert.equal(settings.isFreePlan, false);
     assert.deepEqual(settings.industry, { key: "food", name: "飲食" });
     assert.ok((await adminDb.doc(`siteSettingsEditable/${SITE}`).get()).exists);
+    const profile = (await adminDb.doc(`sitePublicProfile/${SITE}`).get()).data()!;
+    assert.equal(profile.siteName, "さくらベーカリー");
+    assert.equal(profile.isFreePlan, false);
+    assert.ok(!("ownerEmail" in profile));
     const site = (await adminDb.doc(`sites/${SITE}`).get()).data()!;
     assert.equal(site.productionUrl, `https://${DOMAIN}`);
     assert.equal(site.brand.name, "さくらベーカリー");
@@ -230,6 +234,8 @@ describe("手順ごとの処理", () => {
     const settings = (await adminDb.doc(`siteSettings/${SITE}`).get()).data()!;
     assert.equal(settings.isFreePlan, true);
     assert.ok(!("stripeCustomerId" in settings));
+    const profile = (await adminDb.doc(`sitePublicProfile/${SITE}`).get()).data()!;
+    assert.equal(profile.isFreePlan, true);
     assert.ok(!(await adminDb.doc(`domains/www.${DOMAIN}`).get()).exists);
   });
 

@@ -151,6 +151,21 @@ async function firestore({ deps, run }: StepContext): Promise<StepResult> {
     createdAt: now,
     updatedAt: now,
   });
+  // 未ログインでも読める公開用プロフィール。ないと、無料プランの店でも
+  // 「このページは現在準備中です」が出てしまいます（連絡先は載せません）。
+  batch.set(
+    db.doc(`sitePublicProfile/${siteKey}`),
+    {
+      siteName: input.siteName,
+      ownerName: "",
+      homepageUrl: productionUrl,
+      industry: input.industry,
+      isFreePlan: input.plan === "free",
+      setupMode: false,
+      updatedAt: now,
+    },
+    { merge: true }
+  );
   batch.create(db.doc(`siteSettingsEditable/${siteKey}`), { siteKey, createdAt: now });
   batch.create(db.doc(`sites/${siteKey}`), {
     ...buildInitialSiteDocument({

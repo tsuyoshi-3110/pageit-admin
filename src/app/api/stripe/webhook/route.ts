@@ -235,6 +235,31 @@ async function buildJaItemsFromFirestore(
   return out;
 }
 
+/* ----------------------------- 受け取り方 ----------------------------- */
+/**
+ * 配信側が決済を作るときに metadata に入れる、受け取り方です。
+ * 店頭受取（pickup）はお届け先が無いので、請求先の住所を「お届け先」として出しません。
+ * 古い注文や metadata が無い注文は、配送（delivery）として扱います。
+ */
+function fulfillmentOf(session: Stripe.Checkout.Session) {
+  const isPickup = session.metadata?.fulfillment === "pickup";
+  return {
+    isPickup,
+    method: isPickup ? ("pickup" as const) : ("delivery" as const),
+    zone: session.metadata?.shippingZone || null,
+    pickupPlace: session.metadata?.pickupPlace || "",
+    pickupNote: session.metadata?.pickupNote || "",
+  };
+}
+
+const escHtml = (value: string) =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/\n/g, "<br/>");
+
 /* ----------------------------- HTML ----------------------------- */
 function buildOwnerHtmlJa(
   session: Stripe.Checkout.Session & { shipping_details?: ShippingDetails },
@@ -280,8 +305,14 @@ function buildOwnerHtmlJa(
       <tbody>${rows}</tbody>
     </table>
     <p style="margin-top:12px;">合計: <b>${fmtCur(total, cur, locale)}</b></p>
-    <h3>お届け先</h3>
-    <p>氏名：${name}<br/>電話：${phone}<br/>住所：${addr || "-"}</p>
+    ${
+      fulfillmentOf(session).isPickup
+        ? `<h3>受け取り方：店頭受取</h3>
+    <p>氏名：${name}<br/>電話：${phone}<br/>受取場所：${escHtml(fulfillmentOf(session).pickupPlace) || "-"}</p>
+    <p style="color:#b00020;"><b>店頭受取のご注文です。お届け先はありません（発送しないでください）。</b></p>`
+        : `<h3>お届け先</h3>
+    <p>氏名：${name}<br/>電話：${phone}<br/>住所：${addr || "-"}</p>`
+    }
     <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
     <p style="color:#666;font-size:12px;">このメールは Stripe Webhook により自動送信されています。</p>
   </div>`;
@@ -335,8 +366,19 @@ function buildBuyerHtmlI18n(
         <tbody>${rows}</tbody>
       </table>
       <p style="margin-top:12px;"><b>${t.total}: ${fmtCur(total,cur,locale)}</b></p>
-      <h3>${t.shipTo}</h3>
-      <p>${t.name}: ${name}<br/>${t.phone}: ${phone}<br/>${t.address}: ${addr || "-"}</p>
+      ${
+        fulfillmentOf(session).isPickup
+          ? `<h3>${lang === "ja" ? "店頭受取" : "Store pickup"}</h3>
+      <p>${t.name}: ${name}<br/>${t.phone}: ${phone}</p>
+      <p>${lang === "ja" ? "受取場所" : "Pickup location"}: ${escHtml(fulfillmentOf(session).pickupPlace) || "-"}</p>
+      ${
+        fulfillmentOf(session).pickupNote
+          ? `<p>${escHtml(fulfillmentOf(session).pickupNote)}</p>`
+          : ""
+      }`
+          : `<h3>${t.shipTo}</h3>
+      <p>${t.name}: ${name}<br/>${t.phone}: ${phone}<br/>${t.address}: ${addr || "-"}</p>`
+      }
       <hr style="margin:16px 0;border:0;border-top:1px solid #eee;" />
       <p style="color:#666;font-size:12px;">${t.footer}</p>
     </div>`,
@@ -681,6 +723,22 @@ export async function POST(req: NextRequest) {
           })),
 
           buyer_lang: buyerLang,
+
+          // 受け取り方（店頭受取か配送か）と、お客さまがカートで選んだ地域
+          fulfillment: fulfillmentOf(session).method,
+          shippingZone: fulfillmentOf(session).zone,
+          // お届け先（請求先と違うことがあるので分けて持ちます。店頭受取は null）
+          shipping_address: fulfillmentOf(session).isPickup
+            ? null
+            : (session as any).shipping_details?.address ?? null,
+          ...(fulfillmentOf(session).isPickup
+            ? {
+                pickup: {
+                  place: fulfillmentOf(session).pickupPlace,
+                  note: fulfillmentOf(session).pickupNote,
+                },
+              }
+            : {}),
         },
         { merge: true }
       );
